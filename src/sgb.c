@@ -24,6 +24,7 @@
    smc.c: SMC file related operations
 */
 
+#include <ctype.h>
 #include "fileops.h"
 #include "config.h"
 #include "uart.h"
