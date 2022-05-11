@@ -31,7 +31,13 @@ memory.c: RAM operations
 #include "cfg.h"
 #include "cic.h"
 #include "crc.h"
+#if 1
+#define XXH_INLINE_ALL
+#include "xxhash.h"
+#undef XXH_INLINE_ALL
+#else
 #include "crc32.h"
+#endif
 #include "ff.h"
 #include "fileops.h"
 #include "spi.h"
@@ -793,6 +799,42 @@ void save_sram(uint8_t* filename, uint32_t sram_size, uint32_t base_addr) {
   file_close();
 }
 
+#if 1
+/* xxHash version */
+uint32_t calc_sram_crc(uint32_t base_addr, uint32_t size, uint32_t crc) {
+  XXH32_state_t state;
+  uint8_t data[256];
+  uint8_t datap = 0;
+  uint32_t count;
+
+  XXH32_reset(&state, crc);
+  crc_valid=1;
+  set_mcu_addr(base_addr);
+  FPGA_SELECT();
+  FPGA_TX_BYTE(FPGA_CMD_READMEM | FPGA_MEM_AUTOINC);
+  for(count=0; count<size; count++) {
+    FPGA_WAIT_RDY();
+    data[datap] = FPGA_RX_BYTE();
+    if(get_snes_reset()) {
+      crc_valid = 0;
+      sram_crc_valid = romprops.has_combo ? 1 : 0;
+      sram_crc_init = 1;
+      break;
+    }
+    //crc = XXH32_update(crc, data);
+    datap++;
+    if (datap == 0) {
+      XXH32_update(&state, data, 256);
+    }
+  }
+  FPGA_DESELECT();
+  if (datap > 0) {
+    XXH32_update(&state, data, datap);
+  }
+  crc = XXH32_digest(&state);
+  return crc;
+}
+#else
 uint32_t calc_sram_crc(uint32_t base_addr, uint32_t size, uint32_t crc) {
   uint8_t data;
   uint32_t count;
@@ -814,6 +856,7 @@ uint32_t calc_sram_crc(uint32_t base_addr, uint32_t size, uint32_t crc) {
   FPGA_DESELECT();
   return crc;
 }
+#endif
 
 uint8_t sram_reliable() {
   uint16_t score=0;
