@@ -362,7 +362,7 @@ uint8_t menu_main_loop() {
     if(get_snes_reset()) {
       cmd = 0;
     }
-    sleep_ms(20);
+    sleep_ms(16);
     cli_entrycheck();
     if (!cmd) {
       cmd = usbint_handler();
