@@ -333,7 +333,7 @@ uint32_t CDC_block_send( uint8_t *buffer, uint32_t send_size )
 
     // *interrupt
     while ( !Endpoint_IsINReady() ) {	/*-- Wait until ready --*/
-      delay_ms(1);
+      delay_us(1);
     }
 
     // *interrupt
