@@ -35,6 +35,7 @@
 #include <string.h>
 #include "config.h"
 #include "uart.h"
+#include "ff.h"
 
 #define outfunc(x) uart_putc(x)
 
@@ -288,4 +289,64 @@ int puts(const char *str) {
 int putchar(int c) {
   uart_putc(c);
   return 0;
+}
+
+/* writes a character to /sd2snes/log.txt file; buffered up to '\n' or every 512 bytes, whichever comes first */
+static void outlog(char c) {
+  static int opened = 0;
+  static FRESULT fr = FR_OK;
+
+  static FIL file_handle;
+
+  static UINT buf_pos = 0;
+  static char file_buf[512] __attribute__((aligned(4)));
+
+  /* don't keep repeating the same mistakes: */
+  if (fr != FR_OK) {
+    return;
+  }
+
+  /* open the log.txt file for writing first time */
+  if (!opened) {
+    fr = f_open(&file_handle, (TCHAR*)"/sd2snes/log.txt", FA_CREATE_ALWAYS | FA_WRITE);
+    if (fr != FR_OK) {
+      printf("outlog: f_open /sd2snes/log.txt failed; fr = %d\n", fr);
+      return;
+    }
+    /* TODO: f_lseek to end of file to append? */
+
+    opened = -1;
+  }
+
+  /* buffer the character */
+  file_buf[buf_pos++] = c;
+
+  /* write to disk on newlines or if buffer size reached: */
+  if (buf_pos >= 512 || c == '\n') {
+    UINT bytes_written = 0;
+
+    fr = f_write(&file_handle, file_buf, buf_pos, &bytes_written);
+    if (fr != FR_OK) {
+      printf("outlog: f_write to /sd2snes/log.txt failed; fr = %d\n", fr);
+      return;
+    }
+    if (bytes_written < buf_pos) {
+      printf("outlog: f_write to /sd2snes/log.txt did not write enough bytes; %d < %d\n", bytes_written, buf_pos);
+      return;
+    }
+
+    buf_pos = 0;
+  }
+}
+
+/* logs a formatted message to /sd2snes/log.txt using outlog() above */
+int lprintf(const char *format, ...) {
+  va_list ap;
+  int res;
+
+  va_start(ap, format);
+  res = internal_nprintf(outlog, format, ap);
+  va_end(ap);
+
+  return res;
 }

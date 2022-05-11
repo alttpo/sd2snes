@@ -47,4 +47,7 @@ int  snprintf(char *str, size_t size, const char *format, ...);
 
 #endif
 
+// TODO: make a printf.h header or a separate log.[hc] pair
+int lprintf(const char *format, ...);
+
 #endif
