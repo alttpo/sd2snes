@@ -116,6 +116,9 @@ printf("PCONP=%lx\n", LPC_SC->PCONP);
 
   file_init();
   cic_init(0);
+
+  lprintf("" DEVICE_NAME "\n===============\nfw ver.: " CONFIG_VERSION "\ncpu clock: %d Hz\n", CONFIG_CPU_FREQUENCY);
+
 /* setup timer (fpga clk) */
   LPC_TIM3->TCR=2;                         // counter reset
   LPC_TIM3->CTCR=0;                        // increment TC on PCLK
