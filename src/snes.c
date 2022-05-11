@@ -282,15 +282,20 @@ uint8_t get_snes_reset_state(void) {
 uint32_t diffcount = 0, samecount = 0, didnotsave = 0, save_failed = 0, last_save_failed = 0, saveram_offset = 0;
 uint8_t sram_valid = 0;
 uint8_t snes_main_loop() {
+  lprintf("snes_main_loop() {\n");
+  lprintf(" recalculate_sram_range() {\n");
   recalculate_sram_range();
+  lprintf(" recalculate_sram_range() }\n");
 
   /* save the GB RTC if enabled */
   sgb_gtc_save(file_lfn);
 
   if(romprops.sramsize_bytes) {
+    lprintf(" calc_sram_crc() {\n");
     uint32_t crc_bytes = min(romprops.sramsize_bytes - saveram_offset, SRAM_REGION_SIZE);
     saveram_crc = calc_sram_crc(SRAM_SAVE_ADDR + romprops.srambase + saveram_offset, crc_bytes, saveram_crc);
     saveram_offset += crc_bytes;
+    lprintf(" calc_sram_crc() }\n");
     sram_valid = sram_reliable();
     if(crc_valid && sram_valid) {
       if (saveram_offset >= romprops.sramsize_bytes) {
@@ -309,6 +314,7 @@ uint8_t snes_main_loop() {
         }
         if(diffcount>=1 && samecount==5) {
           printf("SaveRAM CRC: 0x%04lx; saving %s\n", saveram_crc, file_lfn);
+          lprintf(" SaveRAM CRC: 0x%04lx; saving %s\n", saveram_crc, file_lfn);
           writeled(1);
           save_srm(file_lfn, romprops.ramsize_bytes, SRAM_SAVE_ADDR);
           last_save_failed = save_failed;
@@ -318,6 +324,7 @@ uint8_t snes_main_loop() {
         }
         if(didnotsave>50) {
           printf("periodic save (sram contents keep changing or previous save failed)\n");
+          lprintf(" periodic save (sram contents keep changing or previous save failed)\n");
           diffcount=0;
           writeled(1);
           save_srm(file_lfn, romprops.ramsize_bytes, SRAM_SAVE_ADDR);
@@ -330,6 +337,7 @@ uint8_t snes_main_loop() {
         saveram_crc_old = saveram_crc;
         
         printf("crc=%lx crc_valid=%d sram_valid=%d diffcount=%ld samecount=%ld, didnotsave=%ld\n", saveram_crc, crc_valid, sram_valid, diffcount, samecount, didnotsave);
+        lprintf(" crc=%lx crc_valid=%d sram_valid=%d diffcount=%ld samecount=%ld, didnotsave=%ld\n", saveram_crc, crc_valid, sram_valid, diffcount, samecount, didnotsave);
 
         saveram_crc = 0;
       }
@@ -344,7 +352,10 @@ uint8_t snes_main_loop() {
     saveram_crc = 0;
   }
 
-  return snes_get_mcu_cmd();
+  uint8_t cmd = snes_get_mcu_cmd();
+
+  lprintf("snes_main_loop() }\n");
+  return cmd;
 }
 
 /*
