@@ -36,6 +36,7 @@
 #include "config.h"
 #include "uart.h"
 #include "ff.h"
+#include "timer.h"
 
 #define outfunc(x) uart_putc(x)
 
@@ -291,11 +292,13 @@ int putchar(int c) {
   return 0;
 }
 
+void led_panic(void);
+
 /* writes a character to /sd2snes/log.txt file; buffered up to '\n' or every 512 bytes, whichever comes first */
 static void outlog(char c) {
   static int opened = 0;
+  static int buf_newline = -1;
   static FRESULT fr = FR_OK;
-
   static FIL file_handle;
 
   static UINT buf_pos = 0;
@@ -303,6 +306,7 @@ static void outlog(char c) {
 
   /* don't keep repeating the same mistakes: */
   if (fr != FR_OK) {
+    led_panic();
     return;
   }
 
@@ -311,31 +315,51 @@ static void outlog(char c) {
     fr = f_open(&file_handle, (TCHAR*)"/sd2snes/log.txt", FA_CREATE_ALWAYS | FA_WRITE);
     if (fr != FR_OK) {
       printf("outlog: f_open /sd2snes/log.txt failed; fr = %d\n", fr);
+      led_panic();
       return;
     }
-    /* TODO: f_lseek to end of file to append? */
+    /* don't f_lseek to end of file to append; we want fresh log.txt every boot */
 
     opened = -1;
+    buf_newline = -1;
+  }
+
+  /* start the new line with the current tick count for timing info: */
+  if (buf_newline) {
+    tick_t ticks = getticks();
+    tick_t secs = ticks / 100;
+    tick_t msec = ticks % 100;
+    buf_pos += snprintf(file_buf, 12, "%6u.%02u: ", secs, msec);
   }
 
   /* buffer the character */
   file_buf[buf_pos++] = c;
+  buf_newline = (c == '\n');
 
   /* write to disk on newlines or if buffer size reached: */
-  if (buf_pos >= 512 || c == '\n') {
+  if (buf_pos >= 512 || buf_newline) {
     UINT bytes_written = 0;
 
     fr = f_write(&file_handle, file_buf, buf_pos, &bytes_written);
+    buf_pos = 0;
     if (fr != FR_OK) {
       printf("outlog: f_write to /sd2snes/log.txt failed; fr = %d\n", fr);
+      led_panic();
       return;
     }
     if (bytes_written < buf_pos) {
       printf("outlog: f_write to /sd2snes/log.txt did not write enough bytes; %d < %d\n", bytes_written, buf_pos);
+      led_panic();
       return;
     }
 
-    buf_pos = 0;
+    /* sync to fs */
+    fr = f_sync(&file_handle);
+    if (fr != FR_OK) {
+      printf("outlog: f_sync to /sd2snes/log.txt failed; fr = %d\n", fr);
+      led_panic();
+      return;
+    }
   }
 }
 
