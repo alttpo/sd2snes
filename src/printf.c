@@ -343,30 +343,22 @@ static void outlog(char c) {
 
   /* start the new line with the current tick count for timing info: */
   if (log_last_c == '\n') {
-    tick_t t = getticks();
+    tick_t t = getMsTicks();
 
     /* cannot recurse with internal_nprintf() due to global usage: */
     /*buf_pos += snprintf(buf, 512, "%7u.%02u: ", secs, msec);*/
 
     log_buf[log_buf_pos+11] = ' ';
     log_buf[log_buf_pos+10] = ':';
-    log_buf[log_buf_pos+9] = (t % 10) + '0';
-    t /= 10;
-    log_buf[log_buf_pos+8] = (t % 10) + '0';
-    t /= 10;
-    log_buf[log_buf_pos+7] = '.';
-    log_buf[log_buf_pos+6] = (t % 10) + '0';
-    t /= 10;
-    log_buf[log_buf_pos+5] = (t % 10) + '0';
-    t /= 10;
-    log_buf[log_buf_pos+4] = (t % 10) + '0';
-    t /= 10;
-    log_buf[log_buf_pos+3] = (t % 10) + '0';
-    t /= 10;
-    log_buf[log_buf_pos+2] = (t % 10) + '0';
-    t /= 10;
-    log_buf[log_buf_pos+1] = (t % 10) + '0';
-    t /= 10;
+    log_buf[log_buf_pos+9] = (t % 10) + '0'; t /= 10;
+    log_buf[log_buf_pos+8] = (t % 10) + '0'; t /= 10;
+    log_buf[log_buf_pos+7] = (t % 10) + '0'; t /= 10;
+    log_buf[log_buf_pos+6] = '.';
+    log_buf[log_buf_pos+5] = (t % 10) + '0'; t /= 10;
+    log_buf[log_buf_pos+4] = (t % 10) + '0'; t /= 10;
+    log_buf[log_buf_pos+3] = (t % 10) + '0'; t /= 10;
+    log_buf[log_buf_pos+2] = (t % 10) + '0'; t /= 10;
+    log_buf[log_buf_pos+1] = (t % 10) + '0'; t /= 10;
     log_buf[log_buf_pos+0] = (t % 10) + '0';
 
     log_buf_pos += 12;

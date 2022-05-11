@@ -5,6 +5,7 @@
 
 typedef unsigned int tick_t;
 
+extern volatile tick_t msTicks;
 extern volatile tick_t ticks;
 #define HZ 100
 #define WARMUP_TICKS 15
@@ -19,6 +20,10 @@ extern volatile tick_t ticks;
  */
 static inline tick_t getticks(void) {
   return ticks;
+}
+
+static inline tick_t getMsTicks(void) {
+  return msTicks;
 }
 
 #define MS_TO_TICKS(x) (x/10)

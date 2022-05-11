@@ -17,15 +17,16 @@ extern volatile int sd_changed;
 extern volatile int reset_changed;
 extern volatile int reset_pressed;
 
-volatile tick_t ticks;
+volatile tick_t msTicks;  /*  1ms ticks */
+volatile tick_t ticks;    /* 10ms ticks */
 volatile int wokefromrit;
 
 void __attribute__((weak,noinline)) SysTick_Hook(void) {
   /* Empty function for hooking the systick handler */
 }
 
-/* Systick interrupt handler */
-void SysTick_Handler(void) {
+/* Systick handler: called every 10ms from interrupt handler */
+void SysTick_10msHandler(void) {
   ticks++;
   static int warmup = 0;
   static uint16_t sdch_state = 0;
@@ -48,6 +49,17 @@ void SysTick_Handler(void) {
   sdn_changed();
   SysTick_Hook();
   if(warmup <= WARMUP_TICKS) warmup++;
+}
+
+/* Systick interrupt handler: called every 1ms */
+void SysTick_Handler(void) {
+  static int msec = 0;
+
+  msTicks++;
+  if (msec++ >= 10) {
+    msec = 0;
+    SysTick_10msHandler();
+  }
 }
 
 void __attribute__((weak,noinline)) RIT_Hook(void) {
@@ -79,7 +91,7 @@ void timer_init(void) {
   BITBAND(LPC_SC->PCLKSEL1, PCLK_TIMER3) = 1;
 
   /* enable SysTick */
-  SysTick_Config((SysTick->CALIB & SysTick_CALIB_TENMS_Msk));
+  SysTick_Config((SysTick->CALIB & SysTick_CALIB_TENMS_Msk) / 10);
 }
 
 void delay_us(unsigned int time) {
