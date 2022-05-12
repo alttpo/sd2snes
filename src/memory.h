@@ -73,7 +73,7 @@ extern char current_filename[];
 
 #define SAVE_BASEDIR    ("/sd2snes/saves/")
 
-#define SRAM_CHUNK_SIZE_BITS 9
+#define SRAM_CHUNK_SIZE_BITS 10
 #define SRAM_CHUNK_SIZE (1<<SRAM_CHUNK_SIZE_BITS)
 
 #define min(a,b) \
