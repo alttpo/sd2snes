@@ -279,6 +279,100 @@ uint8_t get_snes_reset_state(void) {
  * SD2SNES game loop.
  * monitors SRAM changes and other things
  */
+#if 1
+uint32_t saveram_offset = 0; /* only for compatibility */
+
+uint32_t sram_chunk = 0;
+uint32_t sram_chunk_count = 0;
+uint32_t sram_chunk_hash[128];
+uint8_t sram_chunk_data[SRAM_CHUNK_SIZE];
+
+void saveram_loaded(void) {
+  lprintf("saveram_loaded() {\n");
+  sram_chunk_count = romprops.sramsize_bytes / SRAM_CHUNK_SIZE;
+  sram_chunk = 0;
+  for (uint32_t c = 0; c < sram_chunk_count; c++) {
+    lprintf(" xxh %02x {\n", c);
+    sram_chunk_hash[c] = calc_sram_xxh(SRAM_SAVE_ADDR + romprops.srambase, c, sram_chunk_data);
+    lprintf(" xxh %02x }\n", c);
+  }
+  lprintf("saveram_loaded() }\n");
+}
+
+uint8_t snes_main_loop() {
+  uint8_t cmd;
+  uint32_t hash_last = 0;
+
+  lprintf("snes_main_loop() {\n");
+
+  /* save the GB RTC if enabled */
+  sgb_gtc_save(file_lfn);
+
+  if (!romprops.sramsize_bytes) {
+    goto exit;
+  }
+
+  if (sram_chunk_count == 0) {
+    goto exit;
+  }
+
+  lprintf(" xxh %02x {\n", sram_chunk);
+  hash_last = sram_chunk_hash[sram_chunk];
+  sram_chunk_hash[sram_chunk] = calc_sram_xxh(SRAM_SAVE_ADDR + romprops.srambase, sram_chunk, sram_chunk_data);
+  lprintf(" xxh %02x }\n", sram_chunk);
+  if (!crc_valid) {
+    goto exit;
+  }
+
+  if (sram_chunk_hash[sram_chunk] != hash_last) {
+    /* write updated chunk to srm file */
+    uint32_t chunk_offs = sram_chunk << SRAM_CHUNK_SIZE_BITS;
+
+    lprintf(" SD write %02x {\n", sram_chunk);
+    writeled(1);
+    uint8_t srmfile[256] = SAVE_BASEDIR;
+    check_or_create_folder((char *)SAVE_BASEDIR);
+    append_file_basename((char *)srmfile, (char*)file_lfn, ".srm", sizeof(srmfile));
+
+    file_open(srmfile, FA_CREATE_ALWAYS | FA_WRITE);
+    if(file_res) {
+      uart_putc(0x30+file_res);
+      goto done;
+    }
+    if (chunk_offs > 0) {
+      file_seek(chunk_offs);
+      if(file_res) {
+        uart_putc(0x30+file_res);
+        goto done_close;
+      }
+    }
+
+    UINT bytes_written;
+    file_res = f_write(&file_handle, sram_chunk_data, SRAM_CHUNK_SIZE, &bytes_written);
+    if(file_res) {
+      uart_putc(0x30+file_res);
+      goto done_close;
+    }
+
+  done_close:
+    file_close();
+  done:
+    writeled(0);
+    lprintf(" SD write %02x }\n", sram_chunk);
+  }
+
+  sram_chunk++;
+  if (sram_chunk >= sram_chunk_count) {
+    sram_chunk = 0;
+  }
+
+exit:
+  cmd = snes_get_mcu_cmd();
+
+  lprintf("snes_main_loop() }\n");
+  return cmd;
+}
+#else
 uint32_t diffcount = 0, samecount = 0, didnotsave = 0, save_failed = 0, last_save_failed = 0, saveram_offset = 0;
 uint8_t sram_valid = 0;
 uint8_t snes_main_loop() {
@@ -357,6 +451,73 @@ uint8_t snes_main_loop() {
   lprintf("snes_main_loop() }\n");
   return cmd;
 }
+
+/*
+   The goals of this function are the following:
+   - detect a small, fixed set of popular games where the save location is a known, strict subset of sram.
+     this avoids switching to the periodic save to sd mode.
+   - revert to full sram save if there is any change in the rom.  this includes minor hacks that don't change save location.
+   - not support any user control beyond rom modification.
+     user control is very error prone: bad crc when rom is modified, incorrect save region definition, etc.
+   - very limited rom hack coverage.  if the hack changes then it will no longer benefit without an updated crc.
+
+   The full sram location is still loaded and saved.  The restricted bounds are only used to detect when to save.
+*/
+// FIXME do the CRC in FPGA while loading
+void recalculate_sram_range() {
+  static uint32_t crc = 0;
+  static uint32_t cur_addr = 0;
+  static uint32_t end_addr = 0;
+
+  if (!sram_crc_valid && sram_valid) {
+    /*
+      there is a very small chance of collision.  there are several ways to avoid this:
+      - incorporate (concatenate) checksum16 or other information
+      - use a better hash function like sha-256
+     */
+
+    if (sram_crc_init) {
+      printf("\nCalculating rom hash for: base=%06lx, size=%ld\n", SRAM_ROM_ADDR + romprops.load_address, sram_crc_romsize);
+      crc = 0;
+      cur_addr = SRAM_ROM_ADDR + romprops.load_address;
+      end_addr = cur_addr + sram_crc_romsize;
+      sram_crc_init = 0;
+    }
+
+    /*
+      Pick a small enough transfer size where USB transfers don't lose connection during ROM load.
+      It's possible that we switch to periodic save before this is complete.  This is ok because
+      it will switch back if the rom bounds change and the new SaveRAM CRC stops changing.
+    */
+    uint32_t crc_bytes = min(end_addr - cur_addr, SRAM_REGION_SIZE);
+    crc = calc_sram_crc(cur_addr, crc_bytes, crc);
+    cur_addr += crc_bytes;
+
+    if (crc_valid && end_addr && cur_addr >= end_addr) {
+      printf("\nFinished rom hash: %08lx\n", crc);
+
+      for (uint32_t i = 0; i < (sizeof(SramOffsetTable)/sizeof(SramOffset)); i++) {
+        if (crc == SramOffsetTable[i].crc) {
+          romprops.srambase = SramOffsetTable[i].base;
+          romprops.sramsize_bytes = SramOffsetTable[i].size;
+          printf("Rom hash match: base=%lx size=%lx\n", romprops.srambase, romprops.sramsize_bytes);
+
+          // reset some current crc state
+          saveram_crc = 0;
+          //saveram_crc_old = 0; // leave as-is incase we currently match
+          saveram_offset = 0;
+          break;
+        }
+      }
+
+      cur_addr = 0;
+      end_addr = 0;
+      sram_crc_init  = 1;
+      sram_crc_valid = 1;
+    }
+  }
+}
+#endif
 
 /*
  * SD2SNES menu loop.
@@ -555,70 +716,4 @@ void status_load_to_menu() {
 
 void status_save_from_menu() {
   sram_readblock(&STS, SRAM_SNES_STATUS_ADDR, sizeof(snes_status_t));
-}
-
-/*
-   The goals of this function are the following:
-   - detect a small, fixed set of popular games where the save location is a known, strict subset of sram.
-     this avoids switching to the periodic save to sd mode.
-   - revert to full sram save if there is any change in the rom.  this includes minor hacks that don't change save location.
-   - not support any user control beyond rom modification.
-     user control is very error prone: bad crc when rom is modified, incorrect save region definition, etc.
-   - very limited rom hack coverage.  if the hack changes then it will no longer benefit without an updated crc.
-
-   The full sram location is still loaded and saved.  The restricted bounds are only used to detect when to save.
-*/
-// FIXME do the CRC in FPGA while loading
-void recalculate_sram_range() {
-  static uint32_t crc = 0;
-  static uint32_t cur_addr = 0;
-  static uint32_t end_addr = 0;
-
-  if (!sram_crc_valid && sram_valid) {
-    /*
-      there is a very small chance of collision.  there are several ways to avoid this:
-      - incorporate (concatenate) checksum16 or other information
-      - use a better hash function like sha-256
-     */
-
-    if (sram_crc_init) {
-      printf("\nCalculating rom hash for: base=%06lx, size=%ld\n", SRAM_ROM_ADDR + romprops.load_address, sram_crc_romsize);
-      crc = 0;
-      cur_addr = SRAM_ROM_ADDR + romprops.load_address;
-      end_addr = cur_addr + sram_crc_romsize;
-      sram_crc_init = 0;
-    }
-
-    /*
-      Pick a small enough transfer size where USB transfers don't lose connection during ROM load.
-      It's possible that we switch to periodic save before this is complete.  This is ok because
-      it will switch back if the rom bounds change and the new SaveRAM CRC stops changing.
-    */
-    uint32_t crc_bytes = min(end_addr - cur_addr, SRAM_REGION_SIZE);
-    crc = calc_sram_crc(cur_addr, crc_bytes, crc);
-    cur_addr += crc_bytes;
-
-    if (crc_valid && end_addr && cur_addr >= end_addr) {
-      printf("\nFinished rom hash: %08lx\n", crc);
-
-      for (uint32_t i = 0; i < (sizeof(SramOffsetTable)/sizeof(SramOffset)); i++) {
-        if (crc == SramOffsetTable[i].crc) {
-          romprops.srambase = SramOffsetTable[i].base;
-          romprops.sramsize_bytes = SramOffsetTable[i].size;
-          printf("Rom hash match: base=%lx size=%lx\n", romprops.srambase, romprops.sramsize_bytes);
-
-          // reset some current crc state
-          saveram_crc = 0;
-          //saveram_crc_old = 0; // leave as-is incase we currently match
-          saveram_offset = 0;
-          break;
-        }
-      }
-
-      cur_addr = 0;
-      end_addr = 0;
-      sram_crc_init  = 1;
-      sram_crc_valid = 1;
-    }
-  }
 }

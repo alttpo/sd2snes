@@ -159,6 +159,9 @@ void snes_reset(int state);
 uint8_t get_snes_reset(void);
 uint8_t get_snes_reset_state(void);
 uint8_t snes_reset_loop(void);
+#if 1
+void saveram_loaded(void);
+#endif
 uint8_t snes_main_loop(void);
 uint8_t menu_main_loop(void);
 void get_selected_name(uint8_t* lfn);

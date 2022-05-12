@@ -391,7 +391,7 @@ printf("PCONP=%lx\n", LPC_SC->PCONP);
     }
 
     cmd=0;
-    int loop_ticks = getticks();
+    int loop_ticks = getMsTicks();
     uint8_t usb_cmd = 0;
 // uint8_t snes_res;
     while(fpga_test() == FPGA_TEST_TOKEN) {
@@ -419,8 +419,8 @@ printf("PCONP=%lx\n", LPC_SC->PCONP);
       } else {
         if (resetState == SNES_RESET_SHORT) resetButtonState = 1;
         
-        if(getticks() > loop_ticks + 25) {
-          loop_ticks = getticks();
+        if(getMsTicks() > loop_ticks + 16) {
+          loop_ticks = getMsTicks();
  //         sram_reliable();
           printf("%s ", get_cic_statename(get_cic_state()));
           cmd=snes_main_loop();

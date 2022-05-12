@@ -35,9 +35,8 @@ memory.c: RAM operations
 #define XXH_INLINE_ALL
 #include "xxhash.h"
 #undef XXH_INLINE_ALL
-#else
-#include "crc32.h"
 #endif
+#include "crc32.h"
 #include "ff.h"
 #include "fileops.h"
 #include "spi.h"
@@ -449,9 +448,13 @@ uint32_t load_rom(uint8_t* filename, uint32_t base_addr, uint8_t flags) {
       if (romprops.sramsize_bytes) migrate_and_load_srm(filename, SRAM_SAVE_ADDR);
       /* file not found error is ok (SRM file might not exist yet) */
       if(file_res == FR_NO_FILE) file_res = 0;
+#if 1
+      saveram_loaded();
+#else
       saveram_crc_old = calc_sram_crc(SRAM_SAVE_ADDR + romprops.srambase, romprops.sramsize_bytes, 0);
       saveram_crc = 0;
       saveram_offset = 0;
+#endif
     } else {
       printf("No SRAM\n");
     }
@@ -762,23 +765,26 @@ uint32_t load_bootrle(uint32_t base_addr) {
 }
 
 void save_srm(uint8_t* filename, uint32_t sram_size, uint32_t base_addr) {
-    char srmfile[256] = SAVE_BASEDIR;
-    check_or_create_folder(SAVE_BASEDIR);
-    append_file_basename(srmfile, (char*)filename, ".srm", sizeof(srmfile));
-    save_sram((uint8_t*)srmfile, sram_size, base_addr);
+  char srmfile[256] = SAVE_BASEDIR;
+  check_or_create_folder(SAVE_BASEDIR);
+  append_file_basename(srmfile, (char*)filename, ".srm", sizeof(srmfile));
+  save_sram((uint8_t*)srmfile, sram_size, base_addr);
 }
 
 void save_sram(uint8_t* filename, uint32_t sram_size, uint32_t base_addr) {
   uint32_t count = 0;
   uint32_t remain = sram_size;
   size_t copy;
+
   FPGA_DESELECT();
   file_open(filename, FA_CREATE_ALWAYS | FA_WRITE);
   if(file_res) {
     uart_putc(0x30+file_res);
     return;
   }
+
   set_mcu_addr(base_addr);
+
   FPGA_SELECT();
   FPGA_TX_BYTE(0x88); /* read */
   while(remain) {
@@ -801,40 +807,35 @@ void save_sram(uint8_t* filename, uint32_t sram_size, uint32_t base_addr) {
 
 #if 1
 /* xxHash version */
-uint32_t calc_sram_crc(uint32_t base_addr, uint32_t size, uint32_t crc) {
-  XXH32_state_t state;
-  uint8_t data[256];
-  uint8_t datap = 0;
+uint32_t calc_sram_xxh(uint32_t base_addr, uint32_t chunk, uint8_t data[SRAM_CHUNK_SIZE]) {
+  uint32_t chunk_offs = chunk << SRAM_CHUNK_SIZE_BITS;
   uint32_t count;
 
-  XXH32_reset(&state, crc);
   crc_valid=1;
-  set_mcu_addr(base_addr);
+
+  set_mcu_addr(base_addr + chunk_offs);
   FPGA_SELECT();
   FPGA_TX_BYTE(FPGA_CMD_READMEM | FPGA_MEM_AUTOINC);
-  for(count=0; count<size; count++) {
+
+  for(count=0; count<SRAM_CHUNK_SIZE; count++) {
     FPGA_WAIT_RDY();
-    data[datap] = FPGA_RX_BYTE();
+    data[count] = FPGA_RX_BYTE();
     if(get_snes_reset()) {
       crc_valid = 0;
       sram_crc_valid = romprops.has_combo ? 1 : 0;
       sram_crc_init = 1;
       break;
     }
-    //crc = XXH32_update(crc, data);
-    datap++;
-    if (datap == 0) {
-      XXH32_update(&state, data, 256);
-    }
   }
   FPGA_DESELECT();
-  if (datap > 0) {
-    XXH32_update(&state, data, datap);
+
+  if (!crc_valid) {
+    return 0;
   }
-  crc = XXH32_digest(&state);
-  return crc;
+  return XXH32(data, SRAM_CHUNK_SIZE, 0);
 }
-#else
+#endif
+
 uint32_t calc_sram_crc(uint32_t base_addr, uint32_t size, uint32_t crc) {
   uint8_t data;
   uint32_t count;
@@ -856,7 +857,6 @@ uint32_t calc_sram_crc(uint32_t base_addr, uint32_t size, uint32_t crc) {
   FPGA_DESELECT();
   return crc;
 }
-#endif
 
 uint8_t sram_reliable() {
   uint16_t score=0;
