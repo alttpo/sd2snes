@@ -190,4 +190,8 @@ void snes_get_filepath(uint8_t *buffer, uint16_t length);
 void status_load_to_menu(void);
 void status_save_from_menu(void);
 void recalculate_sram_range(void);
+
+void snes_enable_sram_write(int enabled);
+void snes_do_sram_write(void);
+
 #endif

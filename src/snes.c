@@ -283,7 +283,16 @@ uint8_t get_snes_reset_state(void) {
  */
 uint32_t diffcount = 0, samecount = 0, didnotsave = 0, save_failed = 0, last_save_failed = 0, saveram_offset = 0;
 uint8_t sram_valid = 0;
+uint8_t sram_write_enabled = 1;
+
 uint8_t snes_main_loop() {
+    if (sram_write_enabled) {
+        snes_do_sram_write();
+    }
+    return snes_get_mcu_cmd();
+}
+
+void snes_do_sram_write() {
   recalculate_sram_range();
 
   /* save the GB RTC if enabled */
@@ -345,8 +354,10 @@ uint8_t snes_main_loop() {
     saveram_crc_old = 0;
     saveram_crc = 0;
   }
+}
 
-  return snes_get_mcu_cmd();
+void snes_enable_sram_write(int enabled) {
+    sram_write_enabled = enabled;
 }
 
 /*

@@ -126,6 +126,8 @@ enum usbint_server_stream_state_e { FOREACH_SERVER_STREAM_STATE(GENERATE_ENUM) }
   OP(USBINT_SERVER_OPCODE_RESPONSE)             \
                                                 \
   OP(USBINT_SERVER_OPCODE_MGET)                 \
+  OP(USBINT_SERVER_OPCODE_SRAM_ENABLE)          \
+  OP(USBINT_SERVER_OPCODE_SRAM_WRITE)           \
                                                 \
   OP(USBINT_SERVER_OPCODE__COUNT)
 enum usbint_server_opcode_e { FOREACH_SERVER_OPCODE(GENERATE_ENUM) };
@@ -507,8 +509,15 @@ int usbint_handler_cmd(void) {
         }
         break;
     }
+    case USBINT_SERVER_OPCODE_SRAM_ENABLE:
+        // enables/disables periodic SRAM writing to SD card:
+        snes_enable_sram_write(!!cmd_buffer[7]);
+        break;
+    case USBINT_SERVER_OPCODE_SRAM_WRITE:
+        // immediately writes SRAM contents to SD card:
+        snes_do_sram_write();
+        break;
     case USBINT_SERVER_OPCODE_MGET: {
-        // jsd
         int i = 7;
 
         // dont support FILE space:
