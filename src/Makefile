@@ -81,8 +81,8 @@ SRC += printf.c fileops.c fpga.c fpga_spi.c snes.c smc.c
 SRC += memory.c filetypes.c faulthandler.c sort.c crc32.c cic.c
 SRC += cli.c xmodem.c rle.c msu1.c crc16.c sysinfo.c
 SRC += cfg.c cheat.c yaml.c savestate.c sgb.c hwinfo.c
-
 SRC += usbdesc.c usbcore.c usbuser.c cdcuser.c usbinterface.c
+SRC += iovm/iovm.c
 
 # List Assembler source files here.
 #     Make them always end in a capital .S.  Files ending in a lowercase .s
@@ -113,7 +113,7 @@ DEBUG = dwarf-2
 #     Each directory must be seperated by a space.
 #     Use forward slashes for directory separators.
 #     For a directory that has spaces, enclose it in quotes.
-EXTRAINCDIRS =
+EXTRAINCDIRS = iovm
 
 
 # Compiler flag to set the C Standard level.
@@ -145,6 +145,8 @@ endif
 # CC must be defined here to generate the correct CFLAGS
 SHELL = sh
 CC = $(ARCH)-gcc
+AS = $(ARCH)-as
+LD = $(ARCH)-ld
 OBJCOPY = $(ARCH)-objcopy
 OBJDUMP = $(ARCH)-objdump
 SIZE = $(ARCH)-size
@@ -181,7 +183,7 @@ CFLAGS += -ffunction-sections -fdata-sections
 #             for use in COFF files, additional information about filenames
 #             and function names needs to be present in the assembler source
 #             files -- see avr-libc docs [FIXME: not yet described there]
-ASFLAGS = $(CPUFLAGS) -Wa,-adhlns=$(OBJDIR)/$(<:.S=.lst),-gstabs -I$(OBJDIR)
+CCASFLAGS = $(CPUFLAGS) -Wa,-adhlns=$(OBJDIR)/$(<:.S=.lst) -Wa,-gstabs -I$(OBJDIR)
 
 
 #---------------- Linker Options ----------------
@@ -222,7 +224,7 @@ GENDEPFLAGS = -MMD -MP -MF $(DEPDIR)/$(@F).d
 # Combine all necessary flags and optional flags.
 # Add target processor to flags.
 ALL_CFLAGS = -I. $(CFLAGS) $(GENDEPFLAGS)
-ALL_ASFLAGS = -I. -x assembler-with-cpp $(ASFLAGS) $(CDEFS)
+ALL_ASFLAGS = -I. -x assembler-with-cpp $(CCASFLAGS) $(CDEFS)
 
 
 # Default target.
@@ -371,7 +373,7 @@ clean_list :
 	$(Q)$(REMOVE) $(CSRC:.c=.s)
 	$(Q)$(REMOVE) $(CSRC:.c=.d)
 	$(Q)$(REMOVE) $(DEPDIR)/*
-	-$(Q)rmdir --ignore-fail-on-non-empty -p $(OBJDIRS)
+	-$(Q)rmdir -p $(OBJDIRS) || true
 
 # Include the dependency files.
 -include $(info $(DEPDIR)) $(shell mkdir $(DEPDIR) 2>/dev/null) $(wildcard $(DEPDIR)/*)

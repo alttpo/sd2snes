@@ -26,7 +26,6 @@
 
 #include <string.h>
 #include <libgen.h>
-#include <stdlib.h>
 #include "bits.h"
 #include "config.h"
 #include "version.h"
@@ -48,6 +47,7 @@
 #include "cfg.h"
 #include "cdcuser.h"
 #include "cheat.h"
+#include "iovm.h"
 
 static inline void __DMB2(void) { asm volatile ("dmb" ::: "memory"); }
 
@@ -123,7 +123,14 @@ enum usbint_server_stream_state_e { FOREACH_SERVER_STREAM_STATE(GENERATE_ENUM) }
   OP(USBINT_SERVER_OPCODE_STREAM)               \
   OP(USBINT_SERVER_OPCODE_TIME)                 \
                                                 \
-  OP(USBINT_SERVER_OPCODE_RESPONSE)
+  OP(USBINT_SERVER_OPCODE_RESPONSE)             \
+                                                \
+  OP(USBINT_SERVER_OPCODE_SRAM_ENABLE)          \
+  OP(USBINT_SERVER_OPCODE_SRAM_WRITE)           \
+                                                \
+  OP(USBINT_SERVER_OPCODE_IOVM_EXEC)            \
+                                                \
+  OP(USBINT_SERVER_OPCODE__COUNT)
 enum usbint_server_opcode_e { FOREACH_SERVER_OPCODE(GENERATE_ENUM) };
 #ifdef DEBUG_USB
 static const char *usbint_server_opcode_s[] = { FOREACH_SERVER_OPCODE(GENERATE_STRING) };
@@ -147,6 +154,7 @@ static const char *usbint_server_space_s[] = { FOREACH_SERVER_SPACE(GENERATE_STR
   OP(USBINT_SERVER_FLAGS_CLRX=4)               \
   OP(USBINT_SERVER_FLAGS_SETX=8)               \
   OP(USBINT_SERVER_FLAGS_STREAMBURST=16)       \
+  OP(USBINT_SERVER_FLAGS_SIZE_BIT9=32)         \
   OP(USBINT_SERVER_FLAGS_NORESP=64)            \
   OP(USBINT_SERVER_FLAGS_64BDATA=128)
 enum usbint_server_flags_e { FOREACH_SERVER_FLAGS(GENERATE_ENUM) };
@@ -157,6 +165,9 @@ volatile enum usbint_server_stream_state_e stream_state;
 static int reset_state = 0;
 volatile static int cmdDat = 0;
 volatile static unsigned connected = 0;
+
+struct iovm1_t vm;
+uint8_t vm_procedure[512-8];
 
 struct usbint_server_info_t {
   enum usbint_server_opcode_e opcode;
@@ -171,6 +182,8 @@ struct usbint_server_info_t {
 
   // vector operations
   uint32_t vector_count;
+
+  int vm_bytes_sent;
 
   uint8_t data_ready;
   int error;
@@ -233,7 +246,7 @@ void usbint_recv_flit(const unsigned char *in, int length) {
             server_info.cmd_size = USB_BLOCK_SIZE;
         }
         else if (old_recv_buffer_offset < 64 && 64 <= recv_buffer_offset) {
-            server_info.cmd_size = (recv_buffer[4] == USBINT_SERVER_OPCODE_VGET || recv_buffer[4] == USBINT_SERVER_OPCODE_VPUT) ? 64 : 512;
+            server_info.cmd_size = (recv_buffer[4] == USBINT_SERVER_OPCODE_VGET || recv_buffer[4] == USBINT_SERVER_OPCODE_IOVM_EXEC || recv_buffer[4] == USBINT_SERVER_OPCODE_VPUT) ? 64 : 512;
         }
     }
 
@@ -292,6 +305,7 @@ void usbint_recv_block(void) {
     }
     else {
         // data operations
+        // for USBINT_SERVER_OPCODE_PUT, USBINT_SERVER_OPCODE_VPUT
 
         if (server_info.space == USBINT_SERVER_SPACE_FILE) {
             UINT bytesRecv = 0;
@@ -309,6 +323,7 @@ void usbint_recv_block(void) {
         else {
             // write SRAM or CONFIG
             UINT blockBytesWritten = 0;
+
             //PRINT_MSG("[ dat]");
             do {
                 UINT bytesWritten = 0;
@@ -497,6 +512,65 @@ int usbint_handler_cmd(void) {
         }
         break;
     }
+    case USBINT_SERVER_OPCODE_SRAM_ENABLE:
+        // enables/disables periodic SRAM writing to SD card:
+        snes_enable_sram_write(cmd_buffer[7] != 0);
+        break;
+    case USBINT_SERVER_OPCODE_SRAM_WRITE:
+        // immediately writes SRAM contents to SD card:
+        snes_do_sram_write();
+        break;
+    case USBINT_SERVER_OPCODE_IOVM_EXEC: {
+        // TODO: turn this into a PUT-like opcode to accept large-ish programs
+        // accepts either 64-byte or 512-byte requests
+        // always resets block_size to 64 for responses
+        server_info.size = 0;
+        server_info.total_size = 0;
+
+        // make sure we can reply with an error:
+        server_info.flags &= USBINT_SERVER_FLAGS_NORESP;
+
+        // determine 9-bit length of IOVM program:
+        unsigned len = cmd_buffer[7];
+        if (server_info.flags & USBINT_SERVER_FLAGS_SIZE_BIT9) {
+            len |= 0x100;
+        }
+        // validate length:
+        if (len > server_info.block_size - 8) {
+            server_info.error = 128;
+            break;
+        }
+
+        // use 64-byte response block size for lower latency:
+        server_info.block_size = 64;
+
+        // copy procedure from command buffer to vm_procedure:
+        memcpy(vm_procedure, (const uint8_t *) cmd_buffer + 8, len);
+
+        // initialize vm:
+        iovm1_init(&vm);
+
+        // point vm at procedure:
+        server_info.error = iovm1_load(&vm, vm_procedure, len);
+        if (server_info.error) {
+            break;
+        }
+
+        // reset vm to begin execution:
+        server_info.error = iovm1_exec_reset(&vm);
+        if (server_info.error) {
+            break;
+        }
+
+        // don't know how much data up-front will be returned, so just use 1:
+        server_info.size = 1;
+        server_info.total_size = server_info.size;
+
+        // disable first response block until iovm sends data or ends:
+        server_info.flags |= USBINT_SERVER_FLAGS_NORESP;
+
+        break;
+    }
     case USBINT_SERVER_OPCODE_VGET:
     case USBINT_SERVER_OPCODE_VPUT: {
         // don't support MSU for now
@@ -651,7 +725,7 @@ int usbint_handler_cmd(void) {
     PRINT_STATE(server_state);
 
     // decide next state
-    if (server_info.opcode == USBINT_SERVER_OPCODE_GET || server_info.opcode == USBINT_SERVER_OPCODE_VGET || server_info.opcode == USBINT_SERVER_OPCODE_LS) {
+    if (server_info.opcode == USBINT_SERVER_OPCODE_GET || server_info.opcode == USBINT_SERVER_OPCODE_VGET || server_info.opcode == USBINT_SERVER_OPCODE_IOVM_EXEC || server_info.opcode == USBINT_SERVER_OPCODE_LS) {
         // we lock on data transfers so use interrupt for everything
         server_state = USBINT_SERVER_STATE_HANDLE_DAT;
     }
@@ -699,6 +773,9 @@ int usbint_handler_cmd(void) {
 
         // features
         send_buffer[send_buffer_index][6] = current_features;
+        // leave room for more feature flags at [7]
+        // supports this many newer opcodes than RESPONSE:
+        send_buffer[send_buffer_index][8] = USBINT_SERVER_OPCODE__COUNT - (USBINT_SERVER_OPCODE_RESPONSE + 1);
         // currently executing ROM
         char *tempFileName = current_filename;
         // chop from the beginning
@@ -746,18 +823,383 @@ int usbint_handler_cmd(void) {
     }
 
     return ret;
+}
 
+static uint24_t snescmd_addr_from_chip(enum iovm1_memory_chip c, uint24_t a, int l, uint24_t *addr) {
+    // special case for 2C00 EXE buffer:
+    if (a >= 0x200) {
+        return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+    }
+    if (a + l > 0x200) {
+        return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+    }
+
+    *addr = 0x2C00 + a;
+
+    return IOVM1_SUCCESS;
+}
+
+static uint24_t sram_addr_from_chip(enum iovm1_memory_chip c, uint24_t a, int l, uint24_t *addr) {
+    switch (c) {
+        case MEM_SNES_WRAM: // WRAM:
+            if (a >= 0x20000) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            if (a + l > 0x20000) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            *addr = 0xF50000 + a;
+            break;
+        case MEM_SNES_VRAM: // VRAM:
+            if (a >= 0x10000) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            if (a + l > 0x10000) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            *addr = 0xF70000 + a;
+            break;
+        case MEM_SNES_CGRAM: // CGRAM:
+            if (a >= 0x200) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            if (a + l > 0x200) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            *addr = 0xF90000 + a;
+            break;
+        case MEM_SNES_OAM: // OAM:
+            if (a >= 0x220) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            if (a + l > 0x220) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            *addr = 0xF90200 + a;
+            break;
+        case MEM_SNES_ARAM: // APURAM:
+            if (a >= 0x10000) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            if (a + l > 0x10000) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            *addr = 0xF80000 + a;
+            break;
+        case MEM_SNES_ROM: // ROM:
+            if (a >= 0xE00000) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            if (a + l > 0xE00000) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            *addr = 0x000000 + a;
+            break;
+        case MEM_SNES_SRAM: // SRAM:
+            if (a >= 0x150000) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            if (a + l > 0x150000) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            *addr = 0xE00000 + a;
+            break;
+        default: // memory chip not defined:
+            return IOVM1_ERROR_MEMORY_CHIP_UNDEFINED;
+    }
+
+    return IOVM1_SUCCESS;
+}
+
+static bool memory_chip_is_writable(enum iovm1_memory_chip c, uint24_t a) {
+    switch (c) {
+        case MEM_SNES_WRAM: // WRAM:
+        case MEM_SNES_VRAM: // VRAM:
+        case MEM_SNES_CGRAM: // CGRAM:
+        case MEM_SNES_OAM: // OAM:
+        case MEM_SNES_ARAM: // APURAM:
+            return IOVM1_ERROR_MEMORY_CHIP_NOT_WRITABLE;
+        case MEM_SNES_2C00:
+        case MEM_SNES_ROM: // ROM:
+        case MEM_SNES_SRAM: // SRAM:
+            return IOVM1_SUCCESS;
+        default: // memory chip not defined:
+            return IOVM1_ERROR_MEMORY_CHIP_UNDEFINED;
+    }
+}
+
+static void send_byte(uint8_t b) {
+    send_buffer[send_buffer_index][server_info.vm_bytes_sent++] = b;
+
+    if (server_info.vm_bytes_sent >= server_info.block_size) {
+        // flush buffer to USB:
+        usbint_send_block(server_info.block_size);
+        server_info.vm_bytes_sent = 0;
+    }
+}
+
+// advance memory-read state machine, use `vm->rd` for tracking state
+enum iovm1_error host_memory_read_state_machine(struct iovm1_t *vm) {
+    enum iovm1_error err;
+    uint24_t addr;
+
+    // NOTE: we buffer the read data into memory first so that we don't have to wait for a split USB packet to go out
+    // which may compromise the user's timing requirements of the read operation.
+
+    // buffer for data to read into:
+    uint8_t rdbuf[256 + 6];
+    uint8_t *d = rdbuf;
+
+    if (vm->rd.c == MEM_SNES_2C00) {
+        err = snescmd_addr_from_chip(vm->rd.c, vm->rd.a, vm->rd.l, &addr);
+        if (err != IOVM1_SUCCESS) {
+            return err;
+        }
+
+        // start read-data message:
+        *d++ = 0xFE;
+        // memory chip:
+        *d++ = (vm->rd.c);
+        // 24-bit address:
+        *d++ = (vm->rd.a & 0xFF);
+        *d++ = ((vm->rd.a >> 8) & 0xFF);
+        *d++ = ((vm->rd.a >> 16) & 0xFF);
+        // length of read (1..255 bytes, and 0 encodes 256 bytes):
+        *d++ = (vm->rd.l_raw);
+
+        fpga_set_snescmd_addr(addr);
+        while (vm->rd.l-- > 0) {
+            *d++ = (fpga_read_snescmd());
+        }
+    } else {
+        err = sram_addr_from_chip(vm->rd.c, vm->rd.a, vm->rd.l, &addr);
+        if (err != IOVM1_SUCCESS) {
+            return err;
+        }
+
+        // start read-data message:
+        *d++ = (0xFE);
+        // memory chip:
+        *d++ = (vm->rd.c);
+        // 24-bit address:
+        *d++ = (vm->rd.a & 0xFF);
+        *d++ = ((vm->rd.a >> 8) & 0xFF);
+        *d++ = ((vm->rd.a >> 16) & 0xFF);
+        // length of read (1..255 bytes, and 0 encodes 256 bytes):
+        *d++ = (vm->rd.l_raw);
+
+        set_mcu_addr(addr);
+        FPGA_SELECT();
+        FPGA_TX_BYTE(0x88);   /* READ */
+        while (vm->rd.l-- > 0) {
+            FPGA_WAIT_RDY();
+            *d++ = FPGA_RX_BYTE();
+        }
+        FPGA_DESELECT();
+    }
+
+    // send out buffered read data:
+    for (uint8_t *s = rdbuf; s < d; s++) {
+        send_byte(*s);
+    }
+
+    vm->rd.os = IOVM1_OPSTATE_COMPLETED;
+    return IOVM1_SUCCESS;
+}
+
+// advance memory-write state machine, use `vm->wr` for tracking state
+enum iovm1_error host_memory_write_state_machine(struct iovm1_t *vm) {
+    enum iovm1_error err;
+    uint24_t addr;
+
+    err = memory_chip_is_writable(vm->wr.c, vm->wr.a);
+    if (err != IOVM1_SUCCESS) {
+        return err;
+    }
+
+    if (vm->wr.c == MEM_SNES_2C00) {
+        err = snescmd_addr_from_chip(vm->wr.c, vm->wr.a, vm->wr.l, &addr);
+        if (err != IOVM1_SUCCESS) {
+            return err;
+        }
+
+        if (addr == 0x2C00 && vm->wr.l > 1) {
+            // write $2C01.. first:
+            fpga_set_snescmd_addr(addr+1);
+            for (int l = 1; l < vm->wr.l; l++) {
+                fpga_write_snescmd(vm->m.ptr[vm->wr.p + l]);
+            }
+            // write $2C00 byte last to enable nmi exe override:
+            fpga_set_snescmd_addr(addr);
+            fpga_write_snescmd(vm->m.ptr[vm->wr.p]);
+        } else {
+            fpga_set_snescmd_addr(addr);
+            while (vm->wr.l-- > 0) {
+                fpga_write_snescmd(vm->m.ptr[vm->wr.p++]);
+            }
+        }
+    } else {
+        err = sram_addr_from_chip(vm->wr.c, vm->wr.a, vm->wr.l, &addr);
+        if (err != IOVM1_SUCCESS) {
+            return err;
+        }
+
+        set_mcu_addr(addr);
+        FPGA_SELECT();
+        FPGA_TX_BYTE(0x98);   /* WRITE */
+        while (vm->wr.l-- > 0) {
+            FPGA_TX_BYTE(vm->m.ptr[vm->wr.p++]);
+            FPGA_WAIT_RDY();
+        }
+        FPGA_DESELECT();
+    }
+
+    vm->wr.os = IOVM1_OPSTATE_COMPLETED;
+    return IOVM1_SUCCESS;
+}
+
+// advance memory-wait state machine, use `vm->wa` for tracking state, use `iovm1_memory_wait_test_byte` for comparison func
+enum iovm1_error host_memory_wait_state_machine(struct iovm1_t *vm) {
+    enum iovm1_error err;
+    uint24_t addr;
+
+    // initialize 16.666ms deadline timer:
+    deadline_us(16666);
+
+    if (vm->wa.c == MEM_SNES_2C00) {
+        err = snescmd_addr_from_chip(vm->wa.c, vm->wa.a, 1, &addr);
+        if (err != IOVM1_SUCCESS) {
+            // clean up deadline timer:
+            deadline_clean_up();
+            return err;
+        }
+
+        while (deadline_in_future()) {
+            uint8_t tmp;
+
+            fpga_set_snescmd_addr(addr);
+            tmp = fpga_read_snescmd();
+
+            if (iovm1_memory_wait_test_byte(vm, tmp)) {
+                // clean up deadline timer:
+                deadline_clean_up();
+
+                vm->wa.os = IOVM1_OPSTATE_COMPLETED;
+                return IOVM1_SUCCESS;
+            }
+        }
+    } else {
+        err = sram_addr_from_chip(vm->wa.c, vm->wa.a, 1, &addr);
+        if (err != IOVM1_SUCCESS) {
+            // clean up deadline timer:
+            deadline_clean_up();
+            return err;
+        }
+
+        while (deadline_in_future()) {
+            uint8_t tmp;
+
+            tmp = sram_readbyte(addr);
+
+            if (iovm1_memory_wait_test_byte(vm, tmp)) {
+                // clean up deadline timer:
+                deadline_clean_up();
+
+                vm->wa.os = IOVM1_OPSTATE_COMPLETED;
+                return IOVM1_SUCCESS;
+            }
+        }
+    }
+
+    // clean up deadline timer:
+    deadline_clean_up();
+    return IOVM1_ERROR_TIMED_OUT;
+}
+
+// try to read a byte from a memory chip, return byte in `*b` if successful
+enum iovm1_error host_memory_try_read_byte(struct iovm1_t *vm, enum iovm1_memory_chip c, uint24_t a, uint8_t *b) {
+    if (c == MEM_SNES_2C00) {
+        // special case for 2C00 EXE buffer:
+        uint24_t addr;
+        enum iovm1_error err = snescmd_addr_from_chip(c, a, 1, &addr);
+        if (err != IOVM1_SUCCESS) {
+            return err;
+        }
+
+        fpga_set_snescmd_addr(addr);
+        *b = fpga_read_snescmd();
+
+        return IOVM1_SUCCESS;
+    } else {
+        uint24_t addr;
+        enum iovm1_error err = sram_addr_from_chip(c, a, 1, &addr);
+        if (err != IOVM1_SUCCESS) {
+            return err;
+        }
+
+        *b = sram_readbyte(addr);
+
+        return IOVM1_SUCCESS;
+    }
+}
+
+// send a program-end message to the client
+void host_send_end(struct iovm1_t *vm) {
+    // end program message:
+    send_byte(0xFF);
+    // error code:
+    send_byte(vm->e);
+    // offset within program of where we ended:
+    send_byte(vm->p & 0xFF);
+    send_byte((vm->p >> 8) & 0xFF);
 }
 
 int usbint_handler_dat(void) {
     int ret = 0;
     static int count = 0;
+    static int reentrant = 0;
     int bytesSent = 0;
     int streamEnd = 0;
 
     if (!server_info.data_ready) return ret;
 
     switch (server_info.opcode) {
+    case USBINT_SERVER_OPCODE_IOVM_EXEC: {
+        enum iovm1_state state;
+
+        if (reentrant) {
+            return ret;
+        }
+        reentrant = -1;
+
+        // keep the USBA header and error/flags:
+        server_info.vm_bytes_sent = 6;
+        if (!server_info.error) {
+            do {
+                // move the state machine forward:
+                server_info.error = iovm1_exec(&vm);
+                if (server_info.error) {
+                    break;
+                }
+
+                state = iovm1_get_exec_state(&vm);
+            } while (state < IOVM1_STATE_ENDED);
+        }
+
+        // finish command:
+        server_info.data_ready = 0;
+        server_state = USBINT_SERVER_STATE_IDLE;
+        if (server_info.vm_bytes_sent > 0) {
+            // clear out any remaining portion of the buffer
+            memset((unsigned char *)send_buffer[send_buffer_index] + server_info.vm_bytes_sent, 0x00, server_info.block_size - server_info.vm_bytes_sent);
+            // send the final block:
+            usbint_send_block(server_info.block_size);
+        }
+
+        // don't use the quirky logic beyond the switch block:
+        reentrant = 0;
+        return ret;
+    }
     case USBINT_SERVER_OPCODE_VGET:
     case USBINT_SERVER_OPCODE_GET: {
         if (server_info.space == USBINT_SERVER_SPACE_FILE) {

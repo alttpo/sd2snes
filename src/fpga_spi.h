@@ -75,6 +75,7 @@
 #define FPGA_CMD_SDDMA_RANGE     (0x60)
 #define FPGA_CMD_READMEM         (0x80)
 #define FPGA_CMD_WRITEMEM        (0x90)
+#define FPGA_CMD_SNESCMD_RD_NOAD (0xa0) /* do not advance */
 #define FPGA_CMD_SNESCMD_SETADDR (0xd0)
 #define FPGA_CMD_SNESCMD_READ    (0xd1)
 #define FPGA_CMD_SNESCMD_WRITE   (0xd2)

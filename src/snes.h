@@ -105,6 +105,8 @@
 #define ASM_EOR_IMM      (0x49)
 #define ASM_RTS          (0x60)
 #define ASM_RTL          (0x6b)
+#define ASM_STZ_ABS      (0x9c)
+#define ASM_JMP_ABS_IND  (0x6c)
 
 #define SNES_BUTTON_LRET (0x3030)
 #define SNES_BUTTON_LREX (0x2070)
@@ -178,7 +180,7 @@ void echo_mcu_cmd(void);
 uint32_t snes_get_mcu_param(void);
 void snescmd_writeshort(uint16_t val, uint16_t addr);
 void snescmd_writebyte(uint8_t val, uint16_t addr);
-uint16_t snescmd_writeblock(void *buf, uint16_t addr, uint16_t size);
+uint16_t snescmd_writeblock(const void *buf, uint16_t addr, uint16_t size);
 uint16_t snescmd_readshort(uint16_t addr);
 uint8_t snescmd_readbyte(uint16_t addr);
 uint32_t snescmd_readlong(uint16_t addr);
@@ -190,4 +192,8 @@ void snes_get_filepath(uint8_t *buffer, uint16_t length);
 void status_load_to_menu(void);
 void status_save_from_menu(void);
 void recalculate_sram_range(void);
+
+void snes_enable_sram_write(int enabled);
+void snes_do_sram_write(void);
+
 #endif
