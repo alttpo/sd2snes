@@ -27,6 +27,7 @@
 #include <string.h>
 #include <libgen.h>
 #include <stdlib.h>
+#include <limits.h>
 #include "bits.h"
 #include "config.h"
 #include "version.h"
@@ -126,8 +127,11 @@ enum usbint_server_stream_state_e { FOREACH_SERVER_STREAM_STATE(GENERATE_ENUM) }
   OP(USBINT_SERVER_OPCODE_RESPONSE)             \
                                                 \
   OP(USBINT_SERVER_OPCODE_MGET)                 \
+                                                \
   OP(USBINT_SERVER_OPCODE_SRAM_ENABLE)          \
   OP(USBINT_SERVER_OPCODE_SRAM_WRITE)           \
+                                                \
+  OP(USBINT_SERVER_OPCODE_NMI_WAIT)             \
                                                 \
   OP(USBINT_SERVER_OPCODE__COUNT)
 enum usbint_server_opcode_e { FOREACH_SERVER_OPCODE(GENERATE_ENUM) };
@@ -589,6 +593,43 @@ int usbint_handler_cmd(void) {
         // set up initial read operation:
         server_info.size = server_info.vector_size[server_info.vector_count];
         server_info.offset = server_info.vector_addr[server_info.vector_count];
+        break;
+    }
+    case USBINT_SERVER_OPCODE_NMI_WAIT: {
+        unsigned tries;
+
+        if (snescmd_readbyte(0x2C00) != 0x00) {
+            // someone already has an NMI vector hook in place:
+            server_info.error = 1;
+            break;
+        }
+
+        // upload a trivial NMI routine that disables itself:
+        // 2C00: STZ $2C00
+        // 2C03: JMP ($FFEA)
+        fpga_set_snescmd_addr(0x2C01);
+        fpga_write_snescmd(0x00);
+        fpga_write_snescmd(0x2C);
+        fpga_write_snescmd(ASM_JMP_ABS_IND);
+        fpga_write_snescmd(0xEA);
+        fpga_write_snescmd(0xFF);
+
+        // last write to 2C00 to enable NMI exec feature:
+        fpga_set_snescmd_addr(0x2C00);
+        fpga_write_snescmd(ASM_STZ_ABS);
+
+        // wait until [$2C00] == $00:
+        // or use `snescmd_readbyte(0x2C00)` which will be slower since it constantly resets the address
+        fpga_set_snescmd_addr(0x2C00);
+        for (tries = 0; tries < INT_MAX && (fpga_read_snescmd_noad() != 0x00); tries++) {
+            (void)0;
+        }
+
+        if (tries == INT_MAX) {
+            // we failed to receive the NMI confirmation:
+            server_info.error = 2;
+            break;
+        }
         break;
     }
     case USBINT_SERVER_OPCODE_VGET:

@@ -487,6 +487,16 @@ uint8_t fpga_read_snescmd() {
   return data;
 }
 
+// read from snescmd without advancing address
+uint8_t fpga_read_snescmd_noad() {
+  uint8_t data;
+  FPGA_SELECT();
+  FPGA_TX_BYTE(FPGA_CMD_SNESCMD_RD_NOAD);
+  data = FPGA_RX_BYTE();
+  FPGA_DESELECT();
+  return data;
+}
+
 void fpga_write_cheat(uint8_t index, uint32_t code) {
   FPGA_SELECT();
   FPGA_TX_BYTE(FPGA_CMD_CHEAT_WRITE);

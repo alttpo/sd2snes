@@ -105,6 +105,8 @@
 #define ASM_EOR_IMM      (0x49)
 #define ASM_RTS          (0x60)
 #define ASM_RTL          (0x6b)
+#define ASM_STZ_ABS      (0x9c)
+#define ASM_JMP_ABS_IND  (0x6c)
 
 #define SNES_BUTTON_LRET (0x3030)
 #define SNES_BUTTON_LREX (0x2070)
