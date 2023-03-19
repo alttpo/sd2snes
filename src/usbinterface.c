@@ -123,7 +123,11 @@ enum usbint_server_stream_state_e { FOREACH_SERVER_STREAM_STATE(GENERATE_ENUM) }
   OP(USBINT_SERVER_OPCODE_STREAM)               \
   OP(USBINT_SERVER_OPCODE_TIME)                 \
                                                 \
-  OP(USBINT_SERVER_OPCODE_RESPONSE)
+  OP(USBINT_SERVER_OPCODE_RESPONSE)             \
+                                                \
+  OP(USBINT_SERVER_OPCODE_MGET)                 \
+                                                \
+  OP(USBINT_SERVER_OPCODE__COUNT)
 enum usbint_server_opcode_e { FOREACH_SERVER_OPCODE(GENERATE_ENUM) };
 #ifdef DEBUG_USB
 static const char *usbint_server_opcode_s[] = { FOREACH_SERVER_OPCODE(GENERATE_STRING) };
@@ -158,6 +162,8 @@ static int reset_state = 0;
 volatile static int cmdDat = 0;
 volatile static unsigned connected = 0;
 
+#define USBINT_MGET_MAX_REQUESTS 18
+
 struct usbint_server_info_t {
   enum usbint_server_opcode_e opcode;
   enum usbint_server_space_e space;
@@ -171,6 +177,10 @@ struct usbint_server_info_t {
 
   // vector operations
   uint32_t vector_count;
+
+  uint32_t vector_total;
+  uint32_t vector_addr[USBINT_MGET_MAX_REQUESTS];
+  uint16_t vector_size[USBINT_MGET_MAX_REQUESTS];
 
   uint8_t data_ready;
   int error;
@@ -233,7 +243,7 @@ void usbint_recv_flit(const unsigned char *in, int length) {
             server_info.cmd_size = USB_BLOCK_SIZE;
         }
         else if (old_recv_buffer_offset < 64 && 64 <= recv_buffer_offset) {
-            server_info.cmd_size = (recv_buffer[4] == USBINT_SERVER_OPCODE_VGET || recv_buffer[4] == USBINT_SERVER_OPCODE_VPUT) ? 64 : 512;
+            server_info.cmd_size = (recv_buffer[4] == USBINT_SERVER_OPCODE_VGET || recv_buffer[4] == USBINT_SERVER_OPCODE_MGET || recv_buffer[4] == USBINT_SERVER_OPCODE_VPUT) ? 64 : 512;
         }
     }
 
@@ -497,6 +507,81 @@ int usbint_handler_cmd(void) {
         }
         break;
     }
+    case USBINT_SERVER_OPCODE_MGET: {
+        // jsd
+        int i = 7;
+
+        // dont support FILE space:
+        server_info.error = (server_info.space == USBINT_SERVER_SPACE_FILE);
+        if (server_info.error) {
+            break;
+        }
+
+        server_info.size = 0;
+        server_info.offset = 0;
+        server_info.total_size = 0;
+        server_info.vector_count = 0;
+        server_info.vector_total = 0;
+
+        // parse the command to get count of reads and all address/size pairs:
+        while (i < 64) {
+            // number of operations (0 = end):
+            int n = cmd_buffer[i++];
+            if (n == 0) {
+                break;
+            }
+            if (n > USBINT_MGET_MAX_REQUESTS) {
+                // would exceed bounds:
+                server_info.error = 1;
+                break;
+            }
+
+            if (i >= 64) {
+                // would exceed bounds:
+                server_info.error = 1;
+                break;
+            }
+
+            // bank byte of 24-bit address
+            uint32_t b = (uint32_t)cmd_buffer[i++] << 16;
+            if (i >= 64) {
+                // would exceed bounds:
+                server_info.error = 1;
+                break;
+            }
+
+            // calculate address,size pairs:
+            for (int k = 0; k < n; k++, server_info.vector_total++) {
+                if (i + 2 >= 64) {
+                    // would exceed bounds:
+                    server_info.error = 1;
+                    break;
+                }
+
+                uint32_t l = cmd_buffer[i++]; // low byte of 24-bit address
+                uint32_t h = cmd_buffer[i++]; // high byte of 24-bit address
+                uint16_t z = cmd_buffer[i++]; // size (0 -> 256, else 1..255)
+                if (z == 0) { z = 256; }
+
+                server_info.total_size += z;
+
+                server_info.vector_addr[server_info.vector_total] = b | (h << 8) | l;
+                server_info.vector_size[server_info.vector_total] = z;
+            }
+        }
+
+        if (server_info.error) {
+            break;
+        }
+        if (server_info.vector_total == 0) {
+            break;
+        }
+
+        // set up initial read operation:
+        server_info.size = server_info.vector_size[server_info.vector_count];
+        server_info.offset = server_info.vector_addr[server_info.vector_count];
+        break;
+    }
     case USBINT_SERVER_OPCODE_VGET:
     case USBINT_SERVER_OPCODE_VPUT: {
         // don't support MSU for now
@@ -651,7 +736,7 @@ int usbint_handler_cmd(void) {
     PRINT_STATE(server_state);
 
     // decide next state
-    if (server_info.opcode == USBINT_SERVER_OPCODE_GET || server_info.opcode == USBINT_SERVER_OPCODE_VGET || server_info.opcode == USBINT_SERVER_OPCODE_LS) {
+    if (server_info.opcode == USBINT_SERVER_OPCODE_GET || server_info.opcode == USBINT_SERVER_OPCODE_VGET || server_info.opcode == USBINT_SERVER_OPCODE_MGET || server_info.opcode == USBINT_SERVER_OPCODE_LS) {
         // we lock on data transfers so use interrupt for everything
         server_state = USBINT_SERVER_STATE_HANDLE_DAT;
     }
@@ -699,6 +784,9 @@ int usbint_handler_cmd(void) {
 
         // features
         send_buffer[send_buffer_index][6] = current_features;
+        // leave room for more feature flags at [7]
+        // supports this many newer opcodes than RESPONSE:
+        send_buffer[send_buffer_index][8] = USBINT_SERVER_OPCODE__COUNT - (USBINT_SERVER_OPCODE_RESPONSE + 1);
         // currently executing ROM
         char *tempFileName = current_filename;
         // chop from the beginning
@@ -758,6 +846,58 @@ int usbint_handler_dat(void) {
     if (!server_info.data_ready) return ret;
 
     switch (server_info.opcode) {
+    case USBINT_SERVER_OPCODE_MGET: {
+        // fill up one 64-byte response block:
+        do {
+            UINT bytesRead = 0;
+            UINT remainingBytes = min(server_info.block_size - bytesSent, server_info.size - count);
+
+            if (server_info.space == USBINT_SERVER_SPACE_SNES) {
+                bytesRead = sram_readblock(
+                    (uint8_t *)send_buffer[send_buffer_index] + bytesSent,
+                    server_info.offset + count,
+                    remainingBytes
+                );
+            }
+            else if (server_info.space == USBINT_SERVER_SPACE_MSU) {
+                bytesRead = msu_readblock(
+                    (uint8_t *)send_buffer[send_buffer_index] + bytesSent,
+                    server_info.offset + count,
+                    remainingBytes
+                );
+            }
+            else if (server_info.space == USBINT_SERVER_SPACE_CMD) {
+                bytesRead = snescmd_readblock(
+                    (uint8_t *)send_buffer[send_buffer_index] + bytesSent,
+                    server_info.offset + count,
+                    remainingBytes
+                );
+            }
+            else {
+                // config
+                uint8_t group = server_info.size & 0xFF;
+                uint8_t index = server_info.offset & 0xFF;
+                uint8_t data  = fpga_read_config(group, index);
+                //printf(" [CONFIG_RD] %2x %2x %2x ", group, index, data);
+                *(uint8_t *)(send_buffer[send_buffer_index] + bytesSent) = data;
+                bytesRead = 1;
+                server_info.size = 1; // reset size/group-valid field
+            }
+            bytesSent += bytesRead;
+            count += bytesRead;
+
+            if (count == server_info.size) {
+                server_info.vector_count++;
+                if (server_info.vector_count < server_info.vector_total) {
+                    // set up next read operation:
+                    server_info.size = server_info.vector_size[server_info.vector_count];
+                    server_info.offset = server_info.vector_addr[server_info.vector_count];
+                    count = 0;
+                }
+            }
+        } while (bytesSent != server_info.block_size && count < server_info.size);
+        break;
+    }
     case USBINT_SERVER_OPCODE_VGET:
     case USBINT_SERVER_OPCODE_GET: {
         if (server_info.space == USBINT_SERVER_SPACE_FILE) {
