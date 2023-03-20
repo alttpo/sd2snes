@@ -49,6 +49,7 @@
 #include "cfg.h"
 #include "cdcuser.h"
 #include "cheat.h"
+#include "iovm.h"
 
 static inline void __DMB2(void) { asm volatile ("dmb" ::: "memory"); }
 
@@ -126,12 +127,13 @@ enum usbint_server_stream_state_e { FOREACH_SERVER_STREAM_STATE(GENERATE_ENUM) }
                                                 \
   OP(USBINT_SERVER_OPCODE_RESPONSE)             \
                                                 \
-  OP(USBINT_SERVER_OPCODE_MGET)                 \
-                                                \
   OP(USBINT_SERVER_OPCODE_SRAM_ENABLE)          \
   OP(USBINT_SERVER_OPCODE_SRAM_WRITE)           \
                                                 \
-  OP(USBINT_SERVER_OPCODE_NMI_WAIT)             \
+  OP(USBINT_SERVER_OPCODE_IOVM_UPLOAD)            \
+  OP(USBINT_SERVER_OPCODE_IOVM_EXEC)              \
+                                                \
+  OP(USBINT_SERVER_OPCODE_MGET)                 \
                                                 \
   OP(USBINT_SERVER_OPCODE__COUNT)
 enum usbint_server_opcode_e { FOREACH_SERVER_OPCODE(GENERATE_ENUM) };
@@ -168,6 +170,11 @@ volatile enum usbint_server_stream_state_e stream_state;
 static int reset_state = 0;
 volatile static int cmdDat = 0;
 volatile static unsigned connected = 0;
+
+struct iovm1_t vm;
+int vm_state = 0;
+unsigned vm_bytes_read = 0;
+unsigned vm_send_offset = 0;
 
 #define USBINT_MGET_MAX_REQUESTS 18
 
@@ -533,6 +540,29 @@ int usbint_handler_cmd(void) {
         // immediately writes SRAM contents to SD card:
         snes_do_sram_write();
         break;
+    case USBINT_SERVER_OPCODE_IOVM_UPLOAD: {
+        // uploads an IOVM procedure into memory for execution:
+        server_info.error = iovm1_load(
+            &vm,
+            512-7,
+            (const uint8_t*)cmd_buffer+7
+        );
+        break;
+    }
+    case USBINT_SERVER_OPCODE_IOVM_EXEC: {
+        // initializes a new IOVM execution:
+        server_info.size = 0;
+        server_info.total_size = 0;
+        server_info.error = iovm1_reset(&vm);
+        if (server_info.error) {
+            break;
+        }
+        server_info.error = iovm1_response_size(
+            &vm,
+            (uint32_t*)&server_info.size
+        );
+        break;
+    }
     case USBINT_SERVER_OPCODE_MGET: {
         int i = 7;
 
@@ -601,13 +631,6 @@ int usbint_handler_cmd(void) {
         // set up initial read operation:
         server_info.size = server_info.vector_size[0];
         server_info.offset = server_info.vector_addr[0];
-        break;
-    }
-    case USBINT_SERVER_OPCODE_NMI_WAIT: {
-        server_info.error = snes_wait_nmi();
-        // clear the flag in case it was set:
-        server_info.flags &= ~(uint8_t)USBINT_SERVER_FLAGS_WAIT_FOR_NMI;
-        server_info.wait_for_nmi = 0;
         break;
     }
     case USBINT_SERVER_OPCODE_VGET:
@@ -764,7 +787,7 @@ int usbint_handler_cmd(void) {
     PRINT_STATE(server_state);
 
     // decide next state
-    if (server_info.opcode == USBINT_SERVER_OPCODE_GET || server_info.opcode == USBINT_SERVER_OPCODE_VGET || server_info.opcode == USBINT_SERVER_OPCODE_MGET || server_info.opcode == USBINT_SERVER_OPCODE_LS) {
+    if (server_info.opcode == USBINT_SERVER_OPCODE_GET || server_info.opcode == USBINT_SERVER_OPCODE_VGET || server_info.opcode == USBINT_SERVER_OPCODE_MGET || server_info.opcode == USBINT_SERVER_OPCODE_IOVM_EXEC || server_info.opcode == USBINT_SERVER_OPCODE_LS) {
         // we lock on data transfers so use interrupt for everything
         server_state = USBINT_SERVER_STATE_HANDLE_DAT;
     }
@@ -862,7 +885,25 @@ int usbint_handler_cmd(void) {
     }
 
     return ret;
+}
 
+int iovm1_target_set_address(struct iovm1_t *vm, enum iovm1_target_e target, uint32_t address) {
+    // TODO
+    return 0;
+}
+int iovm1_target_read(struct iovm1_t *vm, enum iovm1_target_e target, int advance, uint8_t *o_data) {
+    // TODO
+    *o_data = 0xAA;
+    return 0;
+}
+int iovm1_target_write(struct iovm1_t *vm, enum iovm1_target_e target, int advance, uint8_t data) {
+    // TODO
+    return 0;
+}
+int iovm1_emit(struct iovm1_t *vm, uint8_t data) {
+    *((uint8_t *)send_buffer[send_buffer_index] + vm_send_offset) = data;
+    vm_bytes_read = 1;
+    return 0;
 }
 
 int usbint_handler_dat(void) {
@@ -880,6 +921,23 @@ int usbint_handler_dat(void) {
     }
 
     switch (server_info.opcode) {
+    case USBINT_SERVER_OPCODE_IOVM_EXEC: {
+        do {
+            int r;
+
+            vm_bytes_read = 0;
+            vm_send_offset = bytesSent;
+            r = iovm1_exec_step(&vm);
+            if (r) {
+                server_info.error = r;
+                break;
+            }
+
+            bytesSent += vm_bytes_read;
+            count += vm_bytes_read;
+        } while (bytesSent != server_info.block_size && count < server_info.size);
+        break;
+    }
     case USBINT_SERVER_OPCODE_MGET: {
         // fill up one 64-byte response block:
         do {
