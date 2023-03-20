@@ -52,4 +52,11 @@ void delay_us(unsigned int time);
 void delay_ms(unsigned int time);
 void sleep_ms(unsigned int time);
 
+/* establish deadline at "duration" microseconds from now - uses the RIT */
+void deadline_us(unsigned int duration);
+/* returns true if the deadline remains in the future - uses the RIT */
+#define deadline_in_future() (!BITBAND(LPC_RIT->RICTRL, RITINT))
+/* MUST be called after deadline_us to clean up - uses the RIT */
+void deadline_clean_up(void);
+
 #endif

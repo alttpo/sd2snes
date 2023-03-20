@@ -125,3 +125,17 @@ void sleep_ms(unsigned int time) {
   /* Disable RIT */
   LPC_RIT->RICTRL = BV(RITINT);
 }
+
+void deadline_us(unsigned int duration) {
+    /* Prepare RIT */
+    LPC_RIT->RICOUNTER = 0;
+    LPC_RIT->RICOMPVAL = (CONFIG_CPU_FREQUENCY / 1000000) * duration;
+    LPC_RIT->RICTRL    = BV(RITEN) | BV(RITINT);
+}
+
+/* see also: deadline_in_future() in timer.h */
+
+void deadline_clean_up(void) {
+    /* Disable RIT */
+    LPC_RIT->RICTRL = 0;
+}
