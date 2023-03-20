@@ -157,6 +157,7 @@ static const char *usbint_server_space_s[] = { FOREACH_SERVER_SPACE(GENERATE_STR
   OP(USBINT_SERVER_FLAGS_CLRX=4)               \
   OP(USBINT_SERVER_FLAGS_SETX=8)               \
   OP(USBINT_SERVER_FLAGS_STREAMBURST=16)       \
+  OP(USBINT_SERVER_FLAGS_WAIT_FOR_NMI=32)      \
   OP(USBINT_SERVER_FLAGS_NORESP=64)            \
   OP(USBINT_SERVER_FLAGS_64BDATA=128)
 enum usbint_server_flags_e { FOREACH_SERVER_FLAGS(GENERATE_ENUM) };
@@ -489,7 +490,7 @@ int usbint_handler_cmd(void) {
     server_info.offset = 0;
     server_info.error = 0;
 
-    server_info.wait_for_nmi = 0;
+    server_info.wait_for_nmi = server_info.flags & USBINT_SERVER_FLAGS_WAIT_FOR_NMI;
 
     memset((unsigned char *)send_buffer[send_buffer_index], 0, USB_BLOCK_SIZE);
 
@@ -567,11 +568,6 @@ int usbint_handler_cmd(void) {
                 break;
             }
 
-            // high bit of count byte indicates to wait for NMI before reading:
-            if ((x & 0x80) != 0) {
-                server_info.wait_for_nmi = 1;
-            }
-
             // bank byte of 24-bit address
             uint32_t b = (uint32_t)cmd_buffer[i++] << 16;
 
@@ -609,6 +605,9 @@ int usbint_handler_cmd(void) {
     }
     case USBINT_SERVER_OPCODE_NMI_WAIT: {
         server_info.error = snes_wait_nmi();
+        // clear the flag in case it was set:
+        server_info.flags &= ~(uint8_t)USBINT_SERVER_FLAGS_WAIT_FOR_NMI;
+        server_info.wait_for_nmi = 0;
         break;
     }
     case USBINT_SERVER_OPCODE_VGET:
