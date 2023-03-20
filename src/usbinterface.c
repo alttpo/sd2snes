@@ -188,6 +188,8 @@ struct usbint_server_info_t {
   uint32_t vector_addr[USBINT_MGET_MAX_REQUESTS];
   uint16_t vector_size[USBINT_MGET_MAX_REQUESTS];
 
+  uint8_t wait_for_nmi;
+
   uint8_t data_ready;
   int error;
 };
@@ -325,6 +327,13 @@ void usbint_recv_block(void) {
         else {
             // write SRAM or CONFIG
             UINT blockBytesWritten = 0;
+
+            // wait for NMI before writing data:
+            if (server_info.wait_for_nmi) {
+                (void) snes_wait_nmi();
+                server_info.wait_for_nmi = 0;
+            }
+
             //PRINT_MSG("[ dat]");
             do {
                 UINT bytesWritten = 0;
@@ -480,6 +489,8 @@ int usbint_handler_cmd(void) {
     server_info.offset = 0;
     server_info.error = 0;
 
+    server_info.wait_for_nmi = 0;
+
     memset((unsigned char *)send_buffer[send_buffer_index], 0, USB_BLOCK_SIZE);
 
     switch (server_info.opcode) {
@@ -538,8 +549,9 @@ int usbint_handler_cmd(void) {
 
         // parse the command to get count of reads and all address/size pairs:
         while (i < 64) {
-            // number of operations (0 = end):
-            int n = cmd_buffer[i++];
+            // count of read operations (0 = end) is first 5 bits:
+            uint8_t x = cmd_buffer[i++];
+            int n = x & 0x1f;
             if (n == 0) {
                 break;
             }
@@ -555,13 +567,13 @@ int usbint_handler_cmd(void) {
                 break;
             }
 
+            // high bit of count byte indicates to wait for NMI before reading:
+            if ((x & 0x80) != 0) {
+                server_info.wait_for_nmi = 1;
+            }
+
             // bank byte of 24-bit address
             uint32_t b = (uint32_t)cmd_buffer[i++] << 16;
-            if (i >= 64) {
-                // would exceed bounds:
-                server_info.error = 1;
-                break;
-            }
 
             // calculate address,size pairs:
             for (int k = 0; k < n; k++, server_info.vector_total++) {
@@ -591,45 +603,12 @@ int usbint_handler_cmd(void) {
         }
 
         // set up initial read operation:
-        server_info.size = server_info.vector_size[server_info.vector_count];
-        server_info.offset = server_info.vector_addr[server_info.vector_count];
+        server_info.size = server_info.vector_size[0];
+        server_info.offset = server_info.vector_addr[0];
         break;
     }
     case USBINT_SERVER_OPCODE_NMI_WAIT: {
-        unsigned tries;
-
-        if (snescmd_readbyte(0x2C00) != 0x00) {
-            // someone already has an NMI vector hook in place:
-            server_info.error = 1;
-            break;
-        }
-
-        // upload a trivial NMI routine that disables itself:
-        // 2C00: STZ $2C00
-        // 2C03: JMP ($FFEA)
-        fpga_set_snescmd_addr(0x2C01);
-        fpga_write_snescmd(0x00);
-        fpga_write_snescmd(0x2C);
-        fpga_write_snescmd(ASM_JMP_ABS_IND);
-        fpga_write_snescmd(0xEA);
-        fpga_write_snescmd(0xFF);
-
-        // last write to 2C00 to enable NMI exec feature:
-        fpga_set_snescmd_addr(0x2C00);
-        fpga_write_snescmd(ASM_STZ_ABS);
-
-        // wait until [$2C00] == $00:
-        // or use `snescmd_readbyte(0x2C00)` which will be slower since it constantly resets the address
-        fpga_set_snescmd_addr(0x2C00);
-        for (tries = 0; tries < INT_MAX && (fpga_read_snescmd_noad() != 0x00); tries++) {
-            (void)0;
-        }
-
-        if (tries == INT_MAX) {
-            // we failed to receive the NMI confirmation:
-            server_info.error = 2;
-            break;
-        }
+        server_info.error = snes_wait_nmi();
         break;
     }
     case USBINT_SERVER_OPCODE_VGET:
@@ -894,6 +873,12 @@ int usbint_handler_dat(void) {
     int streamEnd = 0;
 
     if (!server_info.data_ready) return ret;
+
+    // wait for NMI before reading data:
+    if (server_info.wait_for_nmi) {
+        (void) snes_wait_nmi();
+        server_info.wait_for_nmi = 0;
+    }
 
     switch (server_info.opcode) {
     case USBINT_SERVER_OPCODE_MGET: {
