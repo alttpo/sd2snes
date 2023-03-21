@@ -81,7 +81,7 @@ SRC += printf.c fileops.c fpga.c fpga_spi.c snes.c smc.c
 SRC += memory.c filetypes.c faulthandler.c sort.c crc32.c cic.c
 SRC += cli.c xmodem.c rle.c msu1.c crc16.c sysinfo.c
 SRC += cfg.c cheat.c yaml.c savestate.c sgb.c hwinfo.c
-SRC += iovm.c
+SRC += iovm/iovm.c
 SRC += usbdesc.c usbcore.c usbuser.c cdcuser.c usbinterface.c
 
 # List Assembler source files here.
@@ -113,7 +113,7 @@ DEBUG = dwarf-2
 #     Each directory must be seperated by a space.
 #     Use forward slashes for directory separators.
 #     For a directory that has spaces, enclose it in quotes.
-EXTRAINCDIRS =
+EXTRAINCDIRS = iovm
 
 
 # Compiler flag to set the C Standard level.
