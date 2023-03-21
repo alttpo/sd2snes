@@ -888,17 +888,57 @@ int usbint_handler_cmd(void) {
 }
 
 int iovm1_target_set_address(struct iovm1_t *vm, enum iovm1_target_e target, uint32_t address) {
-    // TODO
-    return 0;
+    switch (target) {
+        case IOVM1_TARGET_SRAM:
+            set_mcu_addr(address);
+            return 0;
+        case IOVM1_TARGET_SNESCMD:
+            fpga_set_snescmd_addr(address);
+            return 0;
+        default:
+            return 0;
+    }
 }
 int iovm1_target_read(struct iovm1_t *vm, enum iovm1_target_e target, int advance, uint8_t *o_data) {
-    // TODO
-    *o_data = 0xAA;
-    return 0;
+    switch (target) {
+        case IOVM1_TARGET_SRAM:
+            FPGA_SELECT();
+            FPGA_TX_BYTE(advance ? 0x88 : 0x80); /* READ SRAM */
+            FPGA_WAIT_RDY();
+            *o_data = FPGA_RX_BYTE();
+            FPGA_DESELECT();
+            return 0;
+        case IOVM1_TARGET_SNESCMD:
+            FPGA_SELECT();
+            FPGA_TX_BYTE(advance ? FPGA_CMD_SNESCMD_READ : FPGA_CMD_SNESCMD_RD_NOAD);
+            *o_data = FPGA_RX_BYTE();
+            FPGA_DESELECT();
+            return 0;
+        default:
+            return 0;
+    }
 }
 int iovm1_target_write(struct iovm1_t *vm, enum iovm1_target_e target, int advance, uint8_t data) {
-    // TODO
-    return 0;
+    switch (target) {
+        case IOVM1_TARGET_SRAM:
+            FPGA_SELECT();
+            FPGA_TX_BYTE(advance ? 0x98 : 0x90); /* WRITE SRAM */
+            FPGA_TX_BYTE(data);
+            FPGA_WAIT_RDY();
+            FPGA_DESELECT();
+            return 0;
+        case IOVM1_TARGET_SNESCMD:
+            (void) advance; // ignored; no non-advancing write command exists for snescmd
+
+            FPGA_SELECT();
+            FPGA_TX_BYTE(FPGA_CMD_SNESCMD_WRITE);
+            FPGA_TX_BYTE(data);
+            FPGA_TX_BYTE(0x00);
+            FPGA_DESELECT();
+            return 0;
+        default:
+            return 0;
+    }
 }
 int iovm1_emit(struct iovm1_t *vm, uint8_t data) {
     *((uint8_t *)send_buffer[send_buffer_index] + vm_send_offset) = data;
