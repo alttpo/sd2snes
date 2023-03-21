@@ -534,7 +534,7 @@ int usbint_handler_cmd(void) {
     }
     case USBINT_SERVER_OPCODE_SRAM_ENABLE:
         // enables/disables periodic SRAM writing to SD card:
-        snes_enable_sram_write(!!cmd_buffer[7]);
+        snes_enable_sram_write(cmd_buffer[7] != 0);
         break;
     case USBINT_SERVER_OPCODE_SRAM_WRITE:
         // immediately writes SRAM contents to SD card:
@@ -542,22 +542,26 @@ int usbint_handler_cmd(void) {
         break;
     case USBINT_SERVER_OPCODE_IOVM_UPLOAD: {
         // uploads an IOVM procedure into memory for execution:
+        // TODO: turn this into a PUT-like opcode to accept large-ish programs
+        iovm1_init(&vm);
         server_info.error = iovm1_load(
             &vm,
             512-7,
             (const uint8_t*)cmd_buffer+7
         );
+        if (server_info.error) {
+            break;
+        }
+
+        // TODO: verify after upload complete
+        server_info.error = iovm1_verify(&vm);
         break;
     }
     case USBINT_SERVER_OPCODE_IOVM_EXEC: {
         // initializes a new IOVM execution:
         server_info.size = 0;
         server_info.total_size = 0;
-        server_info.error = iovm1_reset(&vm);
-        if (server_info.error) {
-            break;
-        }
-        server_info.error = iovm1_response_size(
+        server_info.error = iovm1_emit_size(
             &vm,
             (uint32_t*)&server_info.size
         );
