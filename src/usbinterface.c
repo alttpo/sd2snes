@@ -170,7 +170,7 @@ volatile static int cmdDat = 0;
 volatile static unsigned connected = 0;
 
 struct iovm1_t vm;
-int vm_state = 0;
+enum iovm1_state_e vm_last_state = IOVM1_STATE_INIT;
 int vm_bytes_read = 0;
 int vm_send_offset = 0;
 
@@ -891,6 +891,8 @@ int usbint_handler_cmd(void) {
 }
 
 int iovm1_target_set_address(struct iovm1_t *vm, enum iovm1_target_e target, uint32_t address) {
+    (void) vm;
+
     switch (target) {
         case IOVM1_TARGET_SRAM:
             set_mcu_addr(address);
@@ -902,7 +904,10 @@ int iovm1_target_set_address(struct iovm1_t *vm, enum iovm1_target_e target, uin
             return 0;
     }
 }
+
 int iovm1_target_read(struct iovm1_t *vm, enum iovm1_target_e target, int advance, uint8_t *o_data) {
+    (void) vm;
+
     switch (target) {
         case IOVM1_TARGET_SRAM:
             FPGA_SELECT();
@@ -921,7 +926,10 @@ int iovm1_target_read(struct iovm1_t *vm, enum iovm1_target_e target, int advanc
             return 0;
     }
 }
+
 int iovm1_target_write(struct iovm1_t *vm, enum iovm1_target_e target, int advance, uint8_t data) {
+    (void) vm;
+
     switch (target) {
         case IOVM1_TARGET_SRAM:
             FPGA_SELECT();
@@ -943,7 +951,10 @@ int iovm1_target_write(struct iovm1_t *vm, enum iovm1_target_e target, int advan
             return 0;
     }
 }
+
 int iovm1_emit(struct iovm1_t *vm, uint8_t data) {
+    (void) vm;
+
     *((uint8_t *)send_buffer[send_buffer_index] + vm_send_offset) = data;
     vm_bytes_read = 1;
     return 0;
@@ -957,7 +968,7 @@ int usbint_handler_dat(void) {
 
     if (!server_info.data_ready) return ret;
 
-    // wait for NMI before reading data:
+    // wait for NMI:
     if (server_info.wait_for_nmi) {
         (void) snes_wait_nmi();
         server_info.wait_for_nmi = 0;
@@ -968,14 +979,34 @@ int usbint_handler_dat(void) {
         do {
             int r;
 
+            // our iovm1_* callbacks above will modify these globals:
             vm_bytes_read = 0;
             vm_send_offset = bytesSent;
+
+            // move the state machine forward one step:
             r = iovm1_exec_step(&vm);
             if (r) {
                 server_info.error = r;
                 break;
             }
 
+            // determine what state we're in:
+            enum iovm1_state_e state = iovm1_exec_state(&vm);
+            if (state == IOVM1_STATE_WHILE_NEQ_LOOP_ITER) {
+                if (vm_last_state == IOVM1_STATE_EXECUTE_NEXT) {
+                    // initialize 16.666ms deadline timer for this WHILE_NEQ loop:
+                    deadline_us(16666);
+                } else if (!deadline_in_future()) {
+                    // timed out, abort loop by moving to WHILE_NEQ_LOOP_END state:
+                    (void) iovm1_exec_while_abort(&vm);
+                }
+            }
+            if (state == IOVM1_STATE_WHILE_NEQ_LOOP_END) {
+                // clean up deadline timer:
+                deadline_clean_up();
+            }
+
+            vm_last_state = state;
             bytesSent += vm_bytes_read;
             count += vm_bytes_read;
         } while (bytesSent != server_info.block_size && count < server_info.size);
