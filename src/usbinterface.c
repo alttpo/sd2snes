@@ -171,8 +171,8 @@ volatile static unsigned connected = 0;
 
 struct iovm1_t vm;
 int vm_state = 0;
-unsigned vm_bytes_read = 0;
-unsigned vm_send_offset = 0;
+int vm_bytes_read = 0;
+int vm_send_offset = 0;
 
 #define USBINT_MGET_MAX_REQUESTS 18
 
@@ -316,6 +316,7 @@ void usbint_recv_block(void) {
     }
     else {
         // data operations
+        // for USBINT_SERVER_OPCODE_PUT, USBINT_SERVER_OPCODE_VPUT
 
         if (server_info.space == USBINT_SERVER_SPACE_FILE) {
             UINT bytesRecv = 0;
