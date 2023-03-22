@@ -26,8 +26,6 @@
 
 #include <string.h>
 #include <libgen.h>
-#include <stdlib.h>
-#include <limits.h>
 #include "bits.h"
 #include "config.h"
 #include "version.h"
@@ -546,8 +544,8 @@ int usbint_handler_cmd(void) {
         iovm1_init(&vm);
         server_info.error = iovm1_load(
             &vm,
-            512-7,
-            (const uint8_t*)cmd_buffer+7
+            (const uint8_t *) cmd_buffer + 7,
+            512 - 7
         );
         if (server_info.error) {
             break;
