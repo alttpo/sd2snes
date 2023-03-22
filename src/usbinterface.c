@@ -541,6 +541,9 @@ int usbint_handler_cmd(void) {
         break;
     case USBINT_SERVER_OPCODE_IOVM_UPLOAD: {
         // uploads an IOVM procedure into memory for execution:
+
+        server_info.total_size = 0;
+
         // TODO: turn this into a PUT-like opcode to accept large-ish programs
         iovm1_init(&vm);
         server_info.error = iovm1_load(
@@ -554,16 +557,27 @@ int usbint_handler_cmd(void) {
 
         // TODO: verify after upload complete
         server_info.error = iovm1_verify(&vm);
+        if (server_info.error) {
+            break;
+        }
+
+        server_info.error = iovm1_emit_size(
+            &vm,
+            (uint32_t*)&server_info.total_size
+        );
         break;
     }
     case USBINT_SERVER_OPCODE_IOVM_EXEC: {
         // initializes a new IOVM execution:
-        server_info.size = 0;
         server_info.total_size = 0;
         server_info.error = iovm1_emit_size(
             &vm,
-            (uint32_t*)&server_info.size
+            (uint32_t*)&server_info.total_size
         );
+        if (server_info.error) {
+            break;
+        }
+        server_info.error = iovm1_exec_reset(&vm);
         break;
     }
     case USBINT_SERVER_OPCODE_MGET: {
