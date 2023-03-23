@@ -564,7 +564,7 @@ int usbint_handler_cmd(void) {
             break;
         }
 
-        server_info.error |= ((int)iovm1_emit_size(
+        server_info.error |= ((int)iovm1_get_total_read(
             &vm,
             (uint32_t*)&server_info.total_size
         ) & 3) << 4;
@@ -574,7 +574,7 @@ int usbint_handler_cmd(void) {
         // initializes a new IOVM execution:
         server_info.size = 0;
         server_info.total_size = 0;
-        server_info.error |= ((int)iovm1_emit_size(
+        server_info.error |= ((int)iovm1_get_total_read(
             &vm,
             (uint32_t*)&server_info.total_size
         ) & 3) << 0;
@@ -1012,7 +1012,7 @@ int usbint_handler_dat(void) {
             }
 
             // determine what state we're in:
-            state = iovm1_exec_state(&vm);
+            state = iovm1_get_exec_state(&vm);
             if (state == IOVM1_STATE_WHILE_NEQ_LOOP_ITER) {
                 if (vm_last_state != IOVM1_STATE_WHILE_NEQ_LOOP_ITER) {
                     // initialize 16.666ms deadline timer for this WHILE_NEQ loop:
