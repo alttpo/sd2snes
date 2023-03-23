@@ -170,7 +170,7 @@ volatile static int cmdDat = 0;
 volatile static unsigned connected = 0;
 
 struct iovm1_t vm;
-enum iovm1_state_e vm_last_state = IOVM1_STATE_INIT;
+enum iovm1_state vm_last_state = IOVM1_STATE_INIT;
 int vm_bytes_read = 0;
 int vm_send_offset = 0;
 uint32_t vm_target_address[2];
@@ -909,14 +909,14 @@ int usbint_handler_cmd(void) {
     return ret;
 }
 
-int iovm1_target_set_address(struct iovm1_t *vm, enum iovm1_target_e target, uint32_t address) {
+int iovm1_target_set_address(struct iovm1_t *vm, iovm1_target target, uint32_t address) {
     (void) vm;
 
     vm_target_address[target] = address;
     return 0;
 }
 
-int iovm1_target_read(struct iovm1_t *vm, enum iovm1_target_e target, int advance, uint8_t *o_data) {
+int iovm1_target_read(struct iovm1_t *vm, iovm1_target target, int advance, uint8_t *o_data) {
     (void) vm;
 
     switch (target) {
@@ -946,7 +946,7 @@ int iovm1_target_read(struct iovm1_t *vm, enum iovm1_target_e target, int advanc
     return 0;
 }
 
-int iovm1_target_write(struct iovm1_t *vm, enum iovm1_target_e target, int advance, uint8_t data) {
+int iovm1_target_write(struct iovm1_t *vm, iovm1_target target, int advance, uint8_t data) {
     (void) vm;
 
     switch (target) {
@@ -995,9 +995,9 @@ int usbint_handler_dat(void) {
 
     switch (server_info.opcode) {
     case USBINT_SERVER_OPCODE_IOVM_EXEC: {
-        enum iovm1_state_e state;
+        enum iovm1_state state;
         do {
-            enum iovm1_error_e r;
+            enum iovm1_error r;
 
             // our iovm1_* callbacks above will modify these globals:
             vm_bytes_read = 0;
