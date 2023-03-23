@@ -173,6 +173,7 @@ struct iovm1_t vm;
 enum iovm1_state_e vm_last_state = IOVM1_STATE_INIT;
 int vm_bytes_read = 0;
 int vm_send_offset = 0;
+uint32_t vm_target_address[2];
 
 #define USBINT_MGET_MAX_REQUESTS 18
 
@@ -546,6 +547,8 @@ int usbint_handler_cmd(void) {
 
         // TODO: turn this into a PUT-like opcode to accept large-ish programs
         iovm1_init(&vm);
+        vm_target_address[0] = 0xF50000;
+        vm_target_address[1] = 0x2C00;
         server_info.error |= ((int)iovm1_load(
             &vm,
             (const uint8_t *) cmd_buffer + 7,
@@ -909,16 +912,8 @@ int usbint_handler_cmd(void) {
 int iovm1_target_set_address(struct iovm1_t *vm, enum iovm1_target_e target, uint32_t address) {
     (void) vm;
 
-    switch (target) {
-        case IOVM1_TARGET_SRAM:
-            set_mcu_addr(address);
-            return 0;
-        case IOVM1_TARGET_SNESCMD:
-            fpga_set_snescmd_addr(address);
-            return 0;
-        default:
-            return 0;
-    }
+    vm_target_address[target] = address;
+    return 0;
 }
 
 int iovm1_target_read(struct iovm1_t *vm, enum iovm1_target_e target, int advance, uint8_t *o_data) {
@@ -926,21 +921,29 @@ int iovm1_target_read(struct iovm1_t *vm, enum iovm1_target_e target, int advanc
 
     switch (target) {
         case IOVM1_TARGET_SRAM:
+            set_mcu_addr(vm_target_address[target]);
             FPGA_SELECT();
             FPGA_TX_BYTE(advance ? 0x88 : 0x80); /* READ SRAM */
             FPGA_WAIT_RDY();
             *o_data = FPGA_RX_BYTE();
             FPGA_DESELECT();
-            return 0;
+            break;
         case IOVM1_TARGET_SNESCMD:
+            fpga_set_snescmd_addr(vm_target_address[target]);
             FPGA_SELECT();
             FPGA_TX_BYTE(advance ? FPGA_CMD_SNESCMD_READ : FPGA_CMD_SNESCMD_RD_NOAD);
             *o_data = FPGA_RX_BYTE();
             FPGA_DESELECT();
-            return 0;
+            break;
         default:
-            return 0;
+            return 127;
     }
+
+    if (advance) {
+        vm_target_address[target]++;
+    }
+
+    return 0;
 }
 
 int iovm1_target_write(struct iovm1_t *vm, enum iovm1_target_e target, int advance, uint8_t data) {
