@@ -546,38 +546,40 @@ int usbint_handler_cmd(void) {
 
         // TODO: turn this into a PUT-like opcode to accept large-ish programs
         iovm1_init(&vm);
-        server_info.error = iovm1_load(
+        server_info.error |= ((int)iovm1_load(
             &vm,
             (const uint8_t *) cmd_buffer + 7,
             512 - 7
-        );
+        ) & 3) << 0;
         if (server_info.error) {
             break;
         }
 
         // TODO: verify after upload complete
-        server_info.error = iovm1_verify(&vm);
+        server_info.error |= ((int)iovm1_verify(&vm) & 3) << 2;
         if (server_info.error) {
             break;
         }
 
-        server_info.error = iovm1_emit_size(
+        server_info.error |= ((int)iovm1_emit_size(
             &vm,
             (uint32_t*)&server_info.total_size
-        );
+        ) & 3) << 4;
         break;
     }
     case USBINT_SERVER_OPCODE_IOVM_EXEC: {
         // initializes a new IOVM execution:
+        server_info.size = 0;
         server_info.total_size = 0;
-        server_info.error = iovm1_emit_size(
+        server_info.error |= ((int)iovm1_emit_size(
             &vm,
             (uint32_t*)&server_info.total_size
-        );
+        ) & 3) << 0;
         if (server_info.error) {
             break;
         }
-        server_info.error = iovm1_exec_reset(&vm);
+        server_info.size = server_info.total_size;
+        server_info.error |= ((int)iovm1_exec_reset(&vm) & 3) << 2;
         break;
     }
     case USBINT_SERVER_OPCODE_MGET: {
@@ -990,8 +992,9 @@ int usbint_handler_dat(void) {
 
     switch (server_info.opcode) {
     case USBINT_SERVER_OPCODE_IOVM_EXEC: {
+        enum iovm1_state_e state;
         do {
-            int r;
+            enum iovm1_error_e r;
 
             // our iovm1_* callbacks above will modify these globals:
             vm_bytes_read = 0;
@@ -1000,14 +1003,15 @@ int usbint_handler_dat(void) {
             // move the state machine forward one step:
             r = iovm1_exec_step(&vm);
             if (r) {
-                server_info.error = r;
+                // TODO: this goes nowhere.
+                server_info.error = (int)r;
                 break;
             }
 
             // determine what state we're in:
-            enum iovm1_state_e state = iovm1_exec_state(&vm);
+            state = iovm1_exec_state(&vm);
             if (state == IOVM1_STATE_WHILE_NEQ_LOOP_ITER) {
-                if (vm_last_state == IOVM1_STATE_EXECUTE_NEXT) {
+                if (vm_last_state != IOVM1_STATE_WHILE_NEQ_LOOP_ITER) {
                     // initialize 16.666ms deadline timer for this WHILE_NEQ loop:
                     deadline_us(16666);
                 } else if (!deadline_in_future()) {
@@ -1023,7 +1027,11 @@ int usbint_handler_dat(void) {
             vm_last_state = state;
             bytesSent += vm_bytes_read;
             count += vm_bytes_read;
-        } while (bytesSent != server_info.block_size && count < server_info.size);
+        } while (bytesSent != server_info.block_size && state != IOVM1_STATE_ENDED);
+
+        if (state == IOVM1_STATE_ENDED) {
+            count = server_info.size;
+        }
         break;
     }
     case USBINT_SERVER_OPCODE_MGET: {
