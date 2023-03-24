@@ -1174,7 +1174,7 @@ int usbint_handler_dat(void) {
 
             if (vm_read_remain_offs == 0) {
                 // move the state machine forward one step:
-                r = iovm1_exec_step(&vm);
+                r = iovm1_exec_until_callback(&vm);
                 if (r) {
                     // TODO: this goes nowhere.
                     server_info.error = (int) r;
