@@ -727,7 +727,8 @@ int usbint_handler_cmd(void) {
         break;
     case USBINT_SERVER_OPCODE_IOVM_UPLOAD: {
         // uploads an IOVM procedure into memory for execution:
-        unsigned len;
+
+        unsigned len = 512 - 7;
 
         server_info.total_size = 0;
 
@@ -739,15 +740,6 @@ int usbint_handler_cmd(void) {
         iovm1_set_write_cb(&vm, iovm_write_cb);
         iovm1_set_while_neq_cb(&vm, iovm_while_neq_cb);
         iovm1_set_while_eq_cb(&vm, iovm_while_eq_cb);
-
-        // determine length of procedure:
-        len = 0;
-        for (unsigned i = 7; i < 512; i++) {
-            len++;
-            if (cmd_buffer[i] == 0) {
-                break;
-            }
-        }
 
         // copy procedure from command buffer to vm_procedure:
         memcpy(vm_procedure, (const uint8_t *) cmd_buffer + 7, len);
@@ -1156,6 +1148,7 @@ int usbint_handler_dat(void) {
                 if (r) {
                     // TODO: this goes nowhere.
                     server_info.error = (int) r;
+                    count = server_info.size;
                     break;
                 }
             }
@@ -1168,6 +1161,8 @@ int usbint_handler_dat(void) {
                     vm_readbuf+vm_read_remain_offs,
                     partial
                 );
+                bytesSent += partial;
+                count += partial;
                 vm_read_remain_offs = partial;
                 vm_read_len -= partial;
             } else if (vm_read_len) {
