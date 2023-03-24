@@ -480,6 +480,8 @@ int usbint_handler(void) {
 void iovm_read_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_address, unsigned len) {
     (void) p_vm;
 
+    if (len == 0) return;
+
     vm_read_len = len;
     vm_read_remain_offs = 0;
     switch (target) {
@@ -491,7 +493,9 @@ void iovm_read_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_address
             FPGA_TX_BYTE((*r_address >> 16) & 0xff);
             FPGA_TX_BYTE((*r_address >> 8) & 0xff);
             FPGA_TX_BYTE((*r_address) & 0xff);
+            FPGA_DESELECT();
 
+            FPGA_SELECT();
             //FPGA_TX_BYTE(advance ? 0x88 : 0x80); /* READ SRAM */
             FPGA_TX_BYTE(0x88); /* READ SRAM */
 
@@ -508,7 +512,9 @@ void iovm_read_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_address
             FPGA_TX_BYTE(FPGA_CMD_SNESCMD_SETADDR);
             FPGA_TX_BYTE(*r_address & 0xff);
             FPGA_TX_BYTE(*r_address >> 8);
+            FPGA_DESELECT();
 
+            FPGA_SELECT();
             //FPGA_TX_BYTE(advance ? FPGA_CMD_SNESCMD_READ : FPGA_CMD_SNESCMD_RD_NOAD);
             FPGA_TX_BYTE(FPGA_CMD_SNESCMD_READ);
 
@@ -526,8 +532,17 @@ void iovm_read_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_address
 void iovm_write_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_address, const uint8_t *i_data, unsigned len) {
     (void) p_vm;
 
+    if (len == 0) return;
+
     switch (target) {
         case IOVM1_TARGET_SRAM:
+            FPGA_SELECT();
+            FPGA_TX_BYTE(FPGA_CMD_SETADDR | FPGA_TGT_MEM);
+            FPGA_TX_BYTE((*r_address >> 16) & 0xff);
+            FPGA_TX_BYTE((*r_address >> 8) & 0xff);
+            FPGA_TX_BYTE((*r_address) & 0xff);
+            FPGA_DESELECT();
+
             FPGA_SELECT();
             //FPGA_TX_BYTE(advance ? 0x98 : 0x90); /* WRITE SRAM */
             FPGA_TX_BYTE(0x98); /* WRITE SRAM */
@@ -539,6 +554,12 @@ void iovm_write_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_addres
             FPGA_DESELECT();
             break;
         case IOVM1_TARGET_SNESCMD:
+            FPGA_SELECT();
+            FPGA_TX_BYTE(FPGA_CMD_SNESCMD_SETADDR);
+            FPGA_TX_BYTE(*r_address & 0xff);
+            FPGA_TX_BYTE(*r_address >> 8);
+            FPGA_DESELECT();
+
             FPGA_SELECT();
             FPGA_TX_BYTE(FPGA_CMD_SNESCMD_WRITE);
             for (unsigned i = 0; i < len; i++) {
@@ -566,7 +587,9 @@ void iovm_while_neq_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t addre
                 FPGA_TX_BYTE((address >> 16) & 0xff);
                 FPGA_TX_BYTE((address >> 8) & 0xff);
                 FPGA_TX_BYTE((address) & 0xff);
+                FPGA_DESELECT();
 
+                FPGA_SELECT();
                 FPGA_TX_BYTE(0x80); /* READ SRAM no-advance */
                 FPGA_WAIT_RDY();
                 tmp = FPGA_RX_BYTE();
@@ -589,7 +612,9 @@ void iovm_while_neq_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t addre
                 FPGA_TX_BYTE(FPGA_CMD_SNESCMD_SETADDR);
                 FPGA_TX_BYTE(address & 0xff);
                 FPGA_TX_BYTE(address >> 8);
+                FPGA_DESELECT();
 
+                FPGA_SELECT();
                 FPGA_TX_BYTE(FPGA_CMD_SNESCMD_RD_NOAD);
                 tmp = FPGA_RX_BYTE();
                 FPGA_DESELECT();
@@ -619,7 +644,9 @@ void iovm_while_eq_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t addres
                 FPGA_TX_BYTE((address >> 16) & 0xff);
                 FPGA_TX_BYTE((address >> 8) & 0xff);
                 FPGA_TX_BYTE((address) & 0xff);
+                FPGA_DESELECT();
 
+                FPGA_SELECT();
                 FPGA_TX_BYTE(0x80); /* READ SRAM no-advance */
                 FPGA_WAIT_RDY();
                 tmp = FPGA_RX_BYTE();
@@ -642,7 +669,9 @@ void iovm_while_eq_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t addres
                 FPGA_TX_BYTE(FPGA_CMD_SNESCMD_SETADDR);
                 FPGA_TX_BYTE(address & 0xff);
                 FPGA_TX_BYTE(address >> 8);
+                FPGA_DESELECT();
 
+                FPGA_SELECT();
                 FPGA_TX_BYTE(FPGA_CMD_SNESCMD_RD_NOAD);
                 tmp = FPGA_RX_BYTE();
                 FPGA_DESELECT();
@@ -657,7 +686,6 @@ void iovm_while_eq_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t addres
         default:
             break;
     }
-
 }
 
 int usbint_handler_cmd(void) {
