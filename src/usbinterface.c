@@ -560,14 +560,14 @@ void iovm1_write_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_addre
             FPGA_TX_BYTE(*r_address >> 8);
             FPGA_DESELECT();
 
-            FPGA_SELECT();
-            FPGA_TX_BYTE(FPGA_CMD_SNESCMD_WRITE);
             for (unsigned i = 0; i < len; i++) {
+                FPGA_SELECT();
+                FPGA_TX_BYTE(FPGA_CMD_SNESCMD_WRITE);
                 FPGA_TX_BYTE(*i_data++);
                 FPGA_TX_BYTE(0x00);
+                FPGA_DESELECT();
                 (*r_address)++;
             }
-            FPGA_DESELECT();
             break;
         default:
             return;
