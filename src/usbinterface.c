@@ -168,14 +168,16 @@ volatile enum usbint_server_stream_state_e stream_state;
 static int reset_state = 0;
 volatile static int cmdDat = 0;
 volatile static unsigned connected = 0;
-
-struct iovm1_t vm;
-enum iovm1_state vm_last_state = IOVM1_STATE_INIT;
-int vm_bytes_read = 0;
-int vm_send_offset = 0;
-uint32_t vm_target_address[2];
-
 #define USBINT_MGET_MAX_REQUESTS 18
+
+#define IOVM1_TARGET_SRAM       0
+#define IOVM1_TARGET_SNESCMD    1
+
+unsigned vm_read_len = 0;
+unsigned vm_read_remain_offs = 0;
+uint8_t vm_procedure[512-7];
+uint8_t vm_readbuf[256];
+struct iovm1_t vm;
 
 struct usbint_server_info_t {
   enum usbint_server_opcode_e opcode;
@@ -475,6 +477,189 @@ int usbint_handler(void) {
     return ret;
 }
 
+void iovm_read_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_address, unsigned len) {
+    (void) p_vm;
+
+    vm_read_len = len;
+    vm_read_remain_offs = 0;
+    switch (target) {
+        case IOVM1_TARGET_SRAM:
+            //set_mcu_addr(*r_address);
+            FPGA_SELECT();
+            FPGA_WAIT_RDY();
+            FPGA_TX_BYTE(FPGA_CMD_SETADDR | FPGA_TGT_MEM);
+            FPGA_TX_BYTE((*r_address >> 16) & 0xff);
+            FPGA_TX_BYTE((*r_address >> 8) & 0xff);
+            FPGA_TX_BYTE((*r_address) & 0xff);
+
+            //FPGA_TX_BYTE(advance ? 0x88 : 0x80); /* READ SRAM */
+            FPGA_TX_BYTE(0x88); /* READ SRAM */
+
+            for (unsigned i = 0; i < len; i++) {
+                FPGA_WAIT_RDY();
+                vm_readbuf[i] = FPGA_RX_BYTE();
+                (*r_address)++;
+            }
+            FPGA_DESELECT();
+            break;
+        case IOVM1_TARGET_SNESCMD:
+            //fpga_set_snescmd_addr(*r_address);
+            FPGA_SELECT();
+            FPGA_TX_BYTE(FPGA_CMD_SNESCMD_SETADDR);
+            FPGA_TX_BYTE(*r_address & 0xff);
+            FPGA_TX_BYTE(*r_address >> 8);
+
+            //FPGA_TX_BYTE(advance ? FPGA_CMD_SNESCMD_READ : FPGA_CMD_SNESCMD_RD_NOAD);
+            FPGA_TX_BYTE(FPGA_CMD_SNESCMD_READ);
+
+            for (unsigned i = 0; i < len; i++) {
+                vm_readbuf[i] = FPGA_RX_BYTE();
+                (*r_address)++;
+            }
+            FPGA_DESELECT();
+            break;
+        default:
+            return;
+    }
+}
+
+void iovm_write_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_address, const uint8_t *i_data, unsigned len) {
+    (void) p_vm;
+
+    switch (target) {
+        case IOVM1_TARGET_SRAM:
+            FPGA_SELECT();
+            //FPGA_TX_BYTE(advance ? 0x98 : 0x90); /* WRITE SRAM */
+            FPGA_TX_BYTE(0x98); /* WRITE SRAM */
+            for (unsigned i = 0; i < len; i++) {
+                FPGA_TX_BYTE(*i_data++);
+                FPGA_WAIT_RDY();
+                (*r_address)++;
+            }
+            FPGA_DESELECT();
+            break;
+        case IOVM1_TARGET_SNESCMD:
+            FPGA_SELECT();
+            FPGA_TX_BYTE(FPGA_CMD_SNESCMD_WRITE);
+            for (unsigned i = 0; i < len; i++) {
+                FPGA_TX_BYTE(*i_data++);
+                FPGA_TX_BYTE(0x00);
+                (*r_address)++;
+            }
+            FPGA_DESELECT();
+            break;
+        default:
+            return;
+    }
+}
+
+void iovm_while_neq_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t address, uint8_t comparison) {
+    switch (target) {
+        case IOVM1_TARGET_SRAM:
+            // initialize 16.666ms deadline timer:
+            deadline_us(16666);
+            while (deadline_in_future()) {
+                uint8_t tmp;
+
+                FPGA_SELECT();
+                FPGA_TX_BYTE(FPGA_CMD_SETADDR | FPGA_TGT_MEM);
+                FPGA_TX_BYTE((address >> 16) & 0xff);
+                FPGA_TX_BYTE((address >> 8) & 0xff);
+                FPGA_TX_BYTE((address) & 0xff);
+
+                FPGA_TX_BYTE(0x80); /* READ SRAM no-advance */
+                FPGA_WAIT_RDY();
+                tmp = FPGA_RX_BYTE();
+                FPGA_DESELECT();
+
+                if (tmp == comparison) {
+                    break;
+                }
+            }
+            // clean up deadline timer:
+            deadline_clean_up();
+            break;
+        case IOVM1_TARGET_SNESCMD:
+            // initialize 16.666ms deadline timer:
+            deadline_us(16666);
+            while (deadline_in_future()) {
+                uint8_t tmp;
+
+                FPGA_SELECT();
+                FPGA_TX_BYTE(FPGA_CMD_SNESCMD_SETADDR);
+                FPGA_TX_BYTE(address & 0xff);
+                FPGA_TX_BYTE(address >> 8);
+
+                FPGA_TX_BYTE(FPGA_CMD_SNESCMD_RD_NOAD);
+                tmp = FPGA_RX_BYTE();
+                FPGA_DESELECT();
+
+                if (tmp == comparison) {
+                    break;
+                }
+            }
+            // clean up deadline timer:
+            deadline_clean_up();
+            break;
+        default:
+            break;
+    }
+}
+
+void iovm_while_eq_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t address, uint8_t comparison) {
+    switch (target) {
+        case IOVM1_TARGET_SRAM:
+            // initialize 16.666ms deadline timer:
+            deadline_us(16666);
+            while (deadline_in_future()) {
+                uint8_t tmp;
+
+                FPGA_SELECT();
+                FPGA_TX_BYTE(FPGA_CMD_SETADDR | FPGA_TGT_MEM);
+                FPGA_TX_BYTE((address >> 16) & 0xff);
+                FPGA_TX_BYTE((address >> 8) & 0xff);
+                FPGA_TX_BYTE((address) & 0xff);
+
+                FPGA_TX_BYTE(0x80); /* READ SRAM no-advance */
+                FPGA_WAIT_RDY();
+                tmp = FPGA_RX_BYTE();
+                FPGA_DESELECT();
+
+                if (tmp != comparison) {
+                    break;
+                }
+            }
+            // clean up deadline timer:
+            deadline_clean_up();
+            break;
+        case IOVM1_TARGET_SNESCMD:
+            // initialize 16.666ms deadline timer:
+            deadline_us(16666);
+            while (deadline_in_future()) {
+                uint8_t tmp;
+
+                FPGA_SELECT();
+                FPGA_TX_BYTE(FPGA_CMD_SNESCMD_SETADDR);
+                FPGA_TX_BYTE(address & 0xff);
+                FPGA_TX_BYTE(address >> 8);
+
+                FPGA_TX_BYTE(FPGA_CMD_SNESCMD_RD_NOAD);
+                tmp = FPGA_RX_BYTE();
+                FPGA_DESELECT();
+
+                if (tmp != comparison) {
+                    break;
+                }
+            }
+            // clean up deadline timer:
+            deadline_clean_up();
+            break;
+        default:
+            break;
+    }
+
+}
+
 int usbint_handler_cmd(void) {
     int ret = 0;
     uint8_t *fileName = (uint8_t *)cmd_buffer + 256;
@@ -547,23 +732,25 @@ int usbint_handler_cmd(void) {
 
         // TODO: turn this into a PUT-like opcode to accept large-ish programs
         iovm1_init(&vm);
-        vm_target_address[0] = 0xF50000;
-        vm_target_address[1] = 0x2C00;
-        server_info.error |= ((int)iovm1_load(
-            &vm,
-            (const uint8_t *) cmd_buffer + 7,
-            512 - 7
-        ) & 3) << 0;
+        iovm1_set_read_cb(&vm, iovm_read_cb);
+        iovm1_set_write_cb(&vm, iovm_write_cb);
+        iovm1_set_while_neq_cb(&vm, iovm_while_neq_cb);
+        iovm1_set_while_eq_cb(&vm, iovm_while_eq_cb);
+
+        // copy procedure from command buffer to vm_procedure:
+        memcpy(vm_procedure, (const uint8_t *) cmd_buffer + 7, 512 - 7);
+        server_info.error |= ((int)iovm1_load(&vm, vm_procedure, 512 - 7) & 3) << 0;
         if (server_info.error) {
             break;
         }
 
-        // TODO: verify after upload complete
+        // verify after upload complete
         server_info.error |= ((int)iovm1_verify(&vm) & 3) << 2;
         if (server_info.error) {
             break;
         }
 
+        // get total_read size:
         server_info.error |= ((int)iovm1_get_total_read(
             &vm,
             (uint32_t*)&server_info.total_size
@@ -574,15 +761,35 @@ int usbint_handler_cmd(void) {
         // initializes a new IOVM execution:
         server_info.size = 0;
         server_info.total_size = 0;
+
+        // get total_read size:
         server_info.error |= ((int)iovm1_get_total_read(
             &vm,
             (uint32_t*)&server_info.total_size
         ) & 3) << 0;
         if (server_info.error) {
+            server_info.size = 0;
+            server_info.total_size = 0;
             break;
         }
+
         server_info.size = server_info.total_size;
+
+        // reset vm:
         server_info.error |= ((int)iovm1_exec_reset(&vm) & 3) << 2;
+        if (server_info.error) {
+            server_info.size = 0;
+            server_info.total_size = 0;
+            break;
+        }
+
+        // good to go:
+        vm.a[0] = 0xF50000;
+        vm.a[1] = 0x2C00;
+
+        vm_read_len = 0;
+        vm_read_remain_offs = 0;
+
         break;
     }
     case USBINT_SERVER_OPCODE_MGET: {
@@ -909,76 +1116,6 @@ int usbint_handler_cmd(void) {
     return ret;
 }
 
-int iovm1_target_set_address(struct iovm1_t *vm, iovm1_target target, uint32_t address) {
-    (void) vm;
-
-    vm_target_address[target] = address;
-    return 0;
-}
-
-int iovm1_target_read(struct iovm1_t *vm, iovm1_target target, int advance, uint8_t *o_data) {
-    (void) vm;
-
-    switch (target) {
-        case IOVM1_TARGET_SRAM:
-            set_mcu_addr(vm_target_address[target]);
-            FPGA_SELECT();
-            FPGA_TX_BYTE(advance ? 0x88 : 0x80); /* READ SRAM */
-            FPGA_WAIT_RDY();
-            *o_data = FPGA_RX_BYTE();
-            FPGA_DESELECT();
-            break;
-        case IOVM1_TARGET_SNESCMD:
-            fpga_set_snescmd_addr(vm_target_address[target]);
-            FPGA_SELECT();
-            FPGA_TX_BYTE(advance ? FPGA_CMD_SNESCMD_READ : FPGA_CMD_SNESCMD_RD_NOAD);
-            *o_data = FPGA_RX_BYTE();
-            FPGA_DESELECT();
-            break;
-        default:
-            return 127;
-    }
-
-    if (advance) {
-        vm_target_address[target]++;
-    }
-
-    return 0;
-}
-
-int iovm1_target_write(struct iovm1_t *vm, iovm1_target target, int advance, uint8_t data) {
-    (void) vm;
-
-    switch (target) {
-        case IOVM1_TARGET_SRAM:
-            FPGA_SELECT();
-            FPGA_TX_BYTE(advance ? 0x98 : 0x90); /* WRITE SRAM */
-            FPGA_TX_BYTE(data);
-            FPGA_WAIT_RDY();
-            FPGA_DESELECT();
-            return 0;
-        case IOVM1_TARGET_SNESCMD:
-            (void) advance; // ignored; no non-advancing write command exists for snescmd
-
-            FPGA_SELECT();
-            FPGA_TX_BYTE(FPGA_CMD_SNESCMD_WRITE);
-            FPGA_TX_BYTE(data);
-            FPGA_TX_BYTE(0x00);
-            FPGA_DESELECT();
-            return 0;
-        default:
-            return 0;
-    }
-}
-
-int iovm1_emit(struct iovm1_t *vm, uint8_t data) {
-    (void) vm;
-
-    *((uint8_t *)send_buffer[send_buffer_index] + vm_send_offset) = data;
-    vm_bytes_read = 1;
-    return 0;
-}
-
 int usbint_handler_dat(void) {
     int ret = 0;
     static int count = 0;
@@ -999,41 +1136,46 @@ int usbint_handler_dat(void) {
         do {
             enum iovm1_error r;
 
-            // our iovm1_* callbacks above will modify these globals:
-            vm_bytes_read = 0;
-            vm_send_offset = bytesSent;
-
-            // move the state machine forward one step:
-            r = iovm1_exec_step(&vm);
-            if (r) {
-                // TODO: this goes nowhere.
-                server_info.error = (int)r;
-                break;
-            }
-
-            // determine what state we're in:
-            state = iovm1_get_exec_state(&vm);
-            if (state == IOVM1_STATE_WHILE_NEQ_LOOP_ITER) {
-                if (vm_last_state != IOVM1_STATE_WHILE_NEQ_LOOP_ITER) {
-                    // initialize 16.666ms deadline timer for this WHILE_NEQ loop:
-                    deadline_us(16666);
-                } else if (!deadline_in_future()) {
-                    // timed out, abort loop by moving to WHILE_NEQ_LOOP_END state:
-                    (void) iovm1_exec_while_abort(&vm);
+            if (vm_read_remain_offs == 0) {
+                // move the state machine forward one step:
+                r = iovm1_exec_step(&vm);
+                if (r) {
+                    // TODO: this goes nowhere.
+                    server_info.error = (int) r;
+                    break;
                 }
             }
-            if (state == IOVM1_STATE_WHILE_NEQ_LOOP_END) {
-                // clean up deadline timer:
-                deadline_clean_up();
+
+            if (bytesSent + vm_read_len > server_info.block_size) {
+                // copy what we have into this block and put the rest in the next block:
+                size_t partial = server_info.block_size - bytesSent;
+                memcpy(
+                    (uint8_t *)send_buffer[send_buffer_index] + bytesSent,
+                    vm_readbuf+vm_read_remain_offs,
+                    partial
+                );
+                vm_read_remain_offs = partial;
+                vm_read_len -= partial;
+            } else if (vm_read_len) {
+                // copy in the data read:
+                memcpy(
+                    (uint8_t *)send_buffer[send_buffer_index] + bytesSent,
+                    vm_readbuf+vm_read_remain_offs,
+                    vm_read_len
+                );
+                bytesSent += vm_read_len;
+                count += vm_read_len;
+                vm_read_len = 0;
+                vm_read_remain_offs = 0;
             }
 
-            vm_last_state = state;
-            bytesSent += vm_bytes_read;
-            count += vm_bytes_read;
+            state = iovm1_get_exec_state(&vm);
         } while (bytesSent != server_info.block_size && state != IOVM1_STATE_ENDED);
 
         if (state == IOVM1_STATE_ENDED) {
             count = server_info.size;
+            vm_read_len = 0;
+            vm_read_remain_offs = 0;
         }
         break;
     }
