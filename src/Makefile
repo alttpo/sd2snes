@@ -144,6 +144,8 @@ endif
 # CC must be defined here to generate the correct CFLAGS
 SHELL = sh
 CC = $(ARCH)-gcc
+AS = $(ARCH)-as
+LD = $(ARCH)-ld
 OBJCOPY = $(ARCH)-objcopy
 OBJDUMP = $(ARCH)-objdump
 SIZE = $(ARCH)-size
@@ -370,7 +372,7 @@ clean_list :
 	$(Q)$(REMOVE) $(CSRC:.c=.s)
 	$(Q)$(REMOVE) $(CSRC:.c=.d)
 	$(Q)$(REMOVE) $(DEPDIR)/*
-	-$(Q)rmdir --ignore-fail-on-non-empty -p $(OBJDIRS)
+	-$(Q)rmdir -p $(OBJDIRS) || true
 
 # Include the dependency files.
 -include $(info $(DEPDIR)) $(shell mkdir $(DEPDIR) 2>/dev/null) $(wildcard $(DEPDIR)/*)
