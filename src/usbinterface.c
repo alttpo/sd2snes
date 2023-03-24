@@ -727,19 +727,33 @@ int usbint_handler_cmd(void) {
         break;
     case USBINT_SERVER_OPCODE_IOVM_UPLOAD: {
         // uploads an IOVM procedure into memory for execution:
+        unsigned len;
 
         server_info.total_size = 0;
 
         // TODO: turn this into a PUT-like opcode to accept large-ish programs
+
+        // initialize vm:
         iovm1_init(&vm);
         iovm1_set_read_cb(&vm, iovm_read_cb);
         iovm1_set_write_cb(&vm, iovm_write_cb);
         iovm1_set_while_neq_cb(&vm, iovm_while_neq_cb);
         iovm1_set_while_eq_cb(&vm, iovm_while_eq_cb);
 
+        // determine length of procedure:
+        len = 0;
+        for (unsigned i = 7; i < 512; i++) {
+            len++;
+            if (cmd_buffer[i] == 0) {
+                break;
+            }
+        }
+
         // copy procedure from command buffer to vm_procedure:
-        memcpy(vm_procedure, (const uint8_t *) cmd_buffer + 7, 512 - 7);
-        server_info.error |= ((int)iovm1_load(&vm, vm_procedure, 512 - 7) & 3) << 0;
+        memcpy(vm_procedure, (const uint8_t *) cmd_buffer + 7, len);
+
+        // point vm at procedure:
+        server_info.error |= ((int)iovm1_load(&vm, vm_procedure, len) & 3) << 0;
         if (server_info.error) {
             break;
         }
@@ -758,7 +772,7 @@ int usbint_handler_cmd(void) {
         break;
     }
     case USBINT_SERVER_OPCODE_IOVM_EXEC: {
-        // initializes a new IOVM execution:
+        // resets IOVM for a new execution:
         server_info.size = 0;
         server_info.total_size = 0;
 
