@@ -182,7 +182,7 @@ CFLAGS += -ffunction-sections -fdata-sections
 #             for use in COFF files, additional information about filenames
 #             and function names needs to be present in the assembler source
 #             files -- see avr-libc docs [FIXME: not yet described there]
-ASFLAGS = $(CPUFLAGS) -Wa,-adhlns=$(OBJDIR)/$(<:.S=.lst),-gstabs -I$(OBJDIR)
+CCASFLAGS = $(CPUFLAGS) -Wa,-adhlns=$(OBJDIR)/$(<:.S=.lst) -Wa,-gstabs -I$(OBJDIR)
 
 
 #---------------- Linker Options ----------------
@@ -223,7 +223,7 @@ GENDEPFLAGS = -MMD -MP -MF $(DEPDIR)/$(@F).d
 # Combine all necessary flags and optional flags.
 # Add target processor to flags.
 ALL_CFLAGS = -I. $(CFLAGS) $(GENDEPFLAGS)
-ALL_ASFLAGS = -I. -x assembler-with-cpp $(ASFLAGS) $(CDEFS)
+ALL_ASFLAGS = -I. -x assembler-with-cpp $(CCASFLAGS) $(CDEFS)
 
 
 # Default target.
