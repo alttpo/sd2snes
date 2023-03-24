@@ -477,7 +477,7 @@ int usbint_handler(void) {
     return ret;
 }
 
-void iovm_read_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_address, unsigned len) {
+void iovm1_read_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_address, unsigned len) {
     (void) p_vm;
 
     if (len == 0) return;
@@ -529,7 +529,7 @@ void iovm_read_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_address
     }
 }
 
-void iovm_write_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_address, const uint8_t *i_data, unsigned len) {
+void iovm1_write_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_address, const uint8_t *i_data, unsigned len) {
     (void) p_vm;
 
     if (len == 0) return;
@@ -574,7 +574,7 @@ void iovm_write_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_addres
     }
 }
 
-void iovm_while_neq_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t address, uint8_t comparison) {
+void iovm1_while_neq_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t address, uint8_t comparison) {
     switch (target) {
         case IOVM1_TARGET_SRAM:
             // initialize 16.666ms deadline timer:
@@ -631,7 +631,7 @@ void iovm_while_neq_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t addre
     }
 }
 
-void iovm_while_eq_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t address, uint8_t comparison) {
+void iovm1_while_eq_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t address, uint8_t comparison) {
     switch (target) {
         case IOVM1_TARGET_SRAM:
             // initialize 16.666ms deadline timer:
@@ -764,10 +764,12 @@ int usbint_handler_cmd(void) {
 
         // initialize vm:
         iovm1_init(&vm);
-        iovm1_set_read_cb(&vm, iovm_read_cb);
-        iovm1_set_write_cb(&vm, iovm_write_cb);
-        iovm1_set_while_neq_cb(&vm, iovm_while_neq_cb);
-        iovm1_set_while_eq_cb(&vm, iovm_while_eq_cb);
+#ifdef IOVM1_USE_CALLBACKS
+        iovm1_set_read_cb(&vm, iovm1_read_cb);
+        iovm1_set_write_cb(&vm, iovm1_write_cb);
+        iovm1_set_while_neq_cb(&vm, iovm1_while_neq_cb);
+        iovm1_set_while_eq_cb(&vm, iovm1_while_eq_cb);
+#endif
 
         // copy procedure from command buffer to vm_procedure:
         memcpy(vm_procedure, (const uint8_t *) cmd_buffer + 7, len);
