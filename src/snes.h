@@ -180,7 +180,7 @@ void echo_mcu_cmd(void);
 uint32_t snes_get_mcu_param(void);
 void snescmd_writeshort(uint16_t val, uint16_t addr);
 void snescmd_writebyte(uint8_t val, uint16_t addr);
-uint16_t snescmd_writeblock(void *buf, uint16_t addr, uint16_t size);
+uint16_t snescmd_writeblock(const void *buf, uint16_t addr, uint16_t size);
 uint16_t snescmd_readshort(uint16_t addr);
 uint8_t snescmd_readbyte(uint16_t addr);
 uint32_t snescmd_readlong(uint16_t addr);

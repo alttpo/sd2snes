@@ -553,7 +553,7 @@ void snes_get_filepath(uint8_t *buffer, uint16_t length) {
 printf("%s\n", buffer);
 }
 
-uint16_t snescmd_writeblock(void *buf, uint16_t addr, uint16_t size) {
+uint16_t snescmd_writeblock(const void *buf, uint16_t addr, uint16_t size) {
   fpga_set_snescmd_addr(addr);
   uint16_t count=size;
   while(count--) {

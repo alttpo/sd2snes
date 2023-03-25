@@ -219,9 +219,9 @@ uint16_t sram_writestrn(void* buf, uint32_t addr, uint16_t size) {
   return elemcount;
 }
 
-uint16_t sram_writeblock(void* buf, uint32_t addr, uint16_t size) {
+uint16_t sram_writeblock(const void* buf, uint32_t addr, uint16_t size) {
   uint16_t count = size;
-  uint8_t* src = buf;
+  const uint8_t* src = buf;
   set_mcu_addr(addr);
   FPGA_SELECT();
   FPGA_TX_BYTE(0x98);   /* WRITE */
