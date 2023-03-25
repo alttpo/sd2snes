@@ -486,43 +486,29 @@ void iovm1_read_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_addres
     vm_read_remain_offs = 0;
     switch (target) {
         case IOVM1_TARGET_SRAM:
-            //set_mcu_addr(*r_address);
-            FPGA_SELECT();
-            FPGA_WAIT_RDY();
-            FPGA_TX_BYTE(FPGA_CMD_SETADDR | FPGA_TGT_MEM);
-            FPGA_TX_BYTE((*r_address >> 16) & 0xff);
-            FPGA_TX_BYTE((*r_address >> 8) & 0xff);
-            FPGA_TX_BYTE((*r_address) & 0xff);
-            FPGA_DESELECT();
-
-            FPGA_SELECT();
-            //FPGA_TX_BYTE(advance ? 0x88 : 0x80); /* READ SRAM */
-            FPGA_TX_BYTE(0x88); /* READ SRAM */
-
-            for (unsigned i = 0; i < len; i++) {
-                FPGA_WAIT_RDY();
-                vm_readbuf[i] = FPGA_RX_BYTE();
-                (*r_address)++;
-            }
-            FPGA_DESELECT();
+            *r_address += sram_readblock(vm_readbuf, *r_address, len);
             break;
         case IOVM1_TARGET_SNESCMD:
-            //fpga_set_snescmd_addr(*r_address);
-            FPGA_SELECT();
-            FPGA_TX_BYTE(FPGA_CMD_SNESCMD_SETADDR);
-            FPGA_TX_BYTE(*r_address & 0xff);
-            FPGA_TX_BYTE(*r_address >> 8);
-            FPGA_DESELECT();
+            *r_address += snescmd_readblock(vm_readbuf, *r_address, len);
+            break;
+        default:
+            return;
+    }
+}
 
-            FPGA_SELECT();
-            //FPGA_TX_BYTE(advance ? FPGA_CMD_SNESCMD_READ : FPGA_CMD_SNESCMD_RD_NOAD);
-            FPGA_TX_BYTE(FPGA_CMD_SNESCMD_READ);
+void iovm1_read_n_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t address, unsigned len) {
+    (void) p_vm;
 
-            for (unsigned i = 0; i < len; i++) {
-                vm_readbuf[i] = FPGA_RX_BYTE();
-                (*r_address)++;
-            }
-            FPGA_DESELECT();
+    if (len == 0) return;
+
+    vm_read_len = len;
+    vm_read_remain_offs = 0;
+    switch (target) {
+        case IOVM1_TARGET_SRAM:
+            sram_readblock(vm_readbuf, address, len);
+            break;
+        case IOVM1_TARGET_SNESCMD:
+            snescmd_readblock(vm_readbuf, address, len);
             break;
         default:
             return;
@@ -536,39 +522,44 @@ void iovm1_write_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_addre
 
     switch (target) {
         case IOVM1_TARGET_SRAM:
-            FPGA_SELECT();
-            FPGA_TX_BYTE(FPGA_CMD_SETADDR | FPGA_TGT_MEM);
-            FPGA_TX_BYTE((*r_address >> 16) & 0xff);
-            FPGA_TX_BYTE((*r_address >> 8) & 0xff);
-            FPGA_TX_BYTE((*r_address) & 0xff);
-            FPGA_DESELECT();
-
-            FPGA_SELECT();
-            //FPGA_TX_BYTE(advance ? 0x98 : 0x90); /* WRITE SRAM */
-            FPGA_TX_BYTE(0x98); /* WRITE SRAM */
-            for (unsigned i = 0; i < len; i++) {
-                FPGA_TX_BYTE(*i_data++);
-                FPGA_WAIT_RDY();
-                (*r_address)++;
-            }
-            FPGA_DESELECT();
+            *r_address += sram_writeblock(i_data, *r_address, len);
             break;
-        case IOVM1_TARGET_SNESCMD:
-            FPGA_SELECT();
-            FPGA_TX_BYTE(FPGA_CMD_SNESCMD_SETADDR);
-            FPGA_TX_BYTE(*r_address & 0xff);
-            FPGA_TX_BYTE(*r_address >> 8);
-            FPGA_DESELECT();
-
-            for (unsigned i = 0; i < len; i++) {
-                FPGA_SELECT();
-                FPGA_TX_BYTE(FPGA_CMD_SNESCMD_WRITE);
-                FPGA_TX_BYTE(*i_data++);
-                FPGA_TX_BYTE(0x00);
-                FPGA_DESELECT();
-                (*r_address)++;
+        case IOVM1_TARGET_SNESCMD: {
+            uint32_t addr = *r_address;
+            if (addr == 0x2C00) {
+                // write to special $2C00 byte last:
+                snescmd_writeblock(i_data+1, addr+1, len-1);
+                snescmd_writebyte(*i_data, addr);
+                *r_address += len;
+            } else {
+                *r_address += snescmd_writeblock(i_data, *r_address, len);
             }
             break;
+        }
+        default:
+            return;
+    }
+}
+
+void iovm1_write_n_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t address, const uint8_t *i_data, unsigned len) {
+    (void) p_vm;
+
+    if (len == 0) return;
+
+    switch (target) {
+        case IOVM1_TARGET_SRAM:
+            sram_writeblock(i_data, address, len);
+            break;
+        case IOVM1_TARGET_SNESCMD: {
+            if (address == 0x2C00) {
+                // write to special $2C00 byte last:
+                snescmd_writeblock(i_data+1, address+1, len-1);
+                snescmd_writebyte(*i_data, address);
+            } else {
+                snescmd_writeblock(i_data, address, len);
+            }
+            break;
+        }
         default:
             return;
     }
@@ -766,7 +757,9 @@ int usbint_handler_cmd(void) {
         iovm1_init(&vm);
 #ifdef IOVM1_USE_CALLBACKS
         iovm1_set_read_cb(&vm, iovm1_read_cb);
+        iovm1_set_read_n_cb(&vm, iovm1_read_n_cb);
         iovm1_set_write_cb(&vm, iovm1_write_cb);
+        iovm1_set_write_n_cb(&vm, iovm1_write_n_cb);
         iovm1_set_while_neq_cb(&vm, iovm1_while_neq_cb);
         iovm1_set_while_eq_cb(&vm, iovm1_while_eq_cb);
 #endif
@@ -1174,7 +1167,7 @@ int usbint_handler_dat(void) {
 
             if (vm_read_remain_offs == 0) {
                 // move the state machine forward one step:
-                r = iovm1_exec_until_callback(&vm);
+                r = iovm1_exec(&vm);
                 if (r) {
                     // TODO: this goes nowhere.
                     server_info.error = (int) r;
