@@ -59,6 +59,13 @@ void clock_init() {
   LPC_TIM3->TCR=1;                         // start the counter
 /* enable FPGA clock output */
   GPIO_MODE_AF(FPGA_CLKREG, FPGA_CLKBIT, 3); /* MAT3.x (FPGA clock) */
+
+    // Configure JTAG pins
+    LPC_PINCON->PINSEL3 &= ~(0x3 << 4);   // Clear bits 4-5 of PINSEL3
+    LPC_PINCON->PINSEL3 |=  (0x2 << 4);   // Set bits 4-5 of PINSEL3 to 0x2 (JTAG mode)
+
+    // Enable JTAG
+    LPC_SC->SCS |= (1 << 0);              // Set bit 0 of SCS register to enable JTAG
 }
 
 void setFlashAccessTime(uint8_t clocks) {
@@ -126,12 +133,12 @@ void setUSBCLKDiv(uint8_t div) {
 }
 
 void enableMainOsc() {
-  LPC_SC->SCS=OSCEN;
+  LPC_SC->SCS|=OSCEN;
   while(!(LPC_SC->SCS&OSCSTAT));
 }
 
 void disableMainOsc() {
-  LPC_SC->SCS=0;
+  LPC_SC->SCS&=~OSCEN;
 }
 
 void PLL0feed() {
