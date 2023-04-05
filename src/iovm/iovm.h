@@ -152,14 +152,17 @@ enum iovm1_error {
     IOVM1_ERROR_VM_UNKNOWN_OPCODE,
 };
 
-// required byte stream:
-
-enum iovm1_stream_error_e {
+enum iovm1_stream_state {
     IOVM1_STREAM_OK,
+    IOVM1_STREAM_ERROR,
     IOVM1_STREAM_EOF,
     IOVM1_STREAM_STALLED
 };
-enum iovm1_stream_error_e iovm1_stream_in(uint32_t i_size, uint32_t *o_size, uint8_t *o_bytes);
+
+// read from `stream` up to `i_size` count into `o_bytes` and report how many bytes read into `*o_size`
+enum iovm1_stream_state iovm1_stream_read(const void *stream, uint32_t i_size, uint32_t *o_size, uint8_t *o_bytes);
+// report into `*o_size` how many bytes available to read from `stream` up to `i_size` count
+enum iovm1_stream_state iovm1_stream_available(const void *stream, uint32_t i_size, uint32_t *o_size);
 
 struct bslice {
     const uint8_t  *ptr;
@@ -167,19 +170,17 @@ struct bslice {
     uint32_t        off;
 };
 
-// forward declaration of iovm1_t so it can be referred to by pointers:
-
-struct iovm1_t;
 struct iovm1_state_t {
-    enum iovm1_opcode   opcode;
-    iovm1_target        target;
+    enum iovm1_opcode       opcode;
+    iovm1_target            target;
+    uint32_t                address;
 
-    uint32_t            address;
-    unsigned            len;
+    const void              *stream;
+    enum iovm1_stream_state stream_state;
 
-    struct bslice       i_data;
+    unsigned                len;
 
-    uint8_t             comparison;
+    uint8_t                 comparison;
 };
 
 #ifdef IOVM1_USE_CALLBACKS
