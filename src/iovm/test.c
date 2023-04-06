@@ -23,8 +23,8 @@ int tests_failed = 0;
 struct fake {
     int count;
 
-    struct iovm1_state_t pre;
-    struct iovm1_state_t post;
+    struct iovm1_work_t pre;
+    struct iovm1_work_t post;
 };
 
 struct fake fake_read;
@@ -41,7 +41,7 @@ void fake_reset(void) {
     fake_while_neq = fake_default;
 }
 
-void iovm1_read_cb(struct iovm1_state_t *cb_state) {
+void iovm1_target_read(struct iovm1_work_t *cb_state) {
     fake_read.count++;
     fake_read.pre = *cb_state;
 
@@ -50,7 +50,7 @@ void iovm1_read_cb(struct iovm1_state_t *cb_state) {
     fake_read.post = *cb_state;
 }
 
-void iovm1_write_cb(struct iovm1_state_t *cb_state) {
+void iovm1_target_write(struct iovm1_work_t *cb_state) {
     fake_write.count++;
     fake_write.pre = *cb_state;
 
@@ -60,13 +60,13 @@ void iovm1_write_cb(struct iovm1_state_t *cb_state) {
     fake_write.post = *cb_state;
 }
 
-void iovm1_while_neq_cb(struct iovm1_state_t *cb_state) {
+void iovm1_target_while_neq(struct iovm1_work_t *cb_state) {
     fake_while_neq.count++;
     fake_while_neq.pre = *cb_state;
     fake_while_neq.post = *cb_state;
 }
 
-void iovm1_while_eq_cb(struct iovm1_state_t *cb_state) {
+void iovm1_target_while_eq(struct iovm1_work_t *cb_state) {
     fake_while_eq.count++;
     fake_while_eq.pre = *cb_state;
     fake_while_eq.post = *cb_state;
@@ -75,10 +75,10 @@ void iovm1_while_eq_cb(struct iovm1_state_t *cb_state) {
 void fake_init_test(struct iovm1_t *vm) {
     iovm1_init(vm);
 #ifdef IOVM_USE_CALLBACKS
-    iovm1_set_read_cb(vm, iovm1_read_cb);
-    iovm1_set_write_cb(vm, iovm1_write_cb);
-    iovm1_set_while_neq_cb(vm, iovm1_while_neq_cb);
-    iovm1_set_while_eq_cb(vm, iovm1_while_eq_cb);
+    iovm1_set_read_cb(vm, iovm1_target_read);
+    iovm1_set_write_cb(vm, iovm1_target_write);
+    iovm1_set_while_neq_cb(vm, iovm1_target_while_neq);
+    iovm1_set_while_eq_cb(vm, iovm1_target_while_eq);
 #endif
 }
 

@@ -109,6 +109,7 @@ opcodes (o):
 */
 
 #include <stdint.h>
+#include <stdbool.h>
 
 #define IOVM1_INST_OPCODE(x)    ((x)&31)
 #define IOVM1_INST_TARGET(x)    (((x)>>5)&7)
@@ -140,8 +141,9 @@ enum iovm1_state {
     IOVM1_STATE_INIT,
     IOVM1_STATE_LOADED,
     IOVM1_STATE_RESET,
-    IOVM1_STATE_EXECUTE_NEXT,
     IOVM1_STATE_STALLED,
+    IOVM1_STATE_EXECUTE_NEXT,
+    IOVM1_STATE_RESUME_OPCODE,
     IOVM1_STATE_ENDED
 };
 
@@ -154,7 +156,6 @@ enum iovm1_error {
 
 enum iovm1_stream_state {
     IOVM1_STREAM_OK,
-    IOVM1_STREAM_ERROR,
     IOVM1_STREAM_EOF,
     IOVM1_STREAM_STALLED
 };
@@ -164,16 +165,16 @@ enum iovm1_stream_state iovm1_stream_read(const void *stream, uint32_t i_size, u
 // report into `*o_size` how many bytes available to read from `stream` up to `i_size` count
 enum iovm1_stream_state iovm1_stream_available(const void *stream, uint32_t i_size, uint32_t *o_size);
 
-struct bslice {
-    const uint8_t  *ptr;
-    uint32_t        len;
-    uint32_t        off;
-};
+static inline uint8_t iovm1_stream_read_byte(const void *stream, enum iovm1_stream_state *o_state) {
+    uint32_t o_size;
+    uint8_t o_bytes;
+    *o_state = iovm1_stream_read(stream, 1, &o_size, &o_bytes);
+    return o_bytes;
+}
 
-struct iovm1_state_t {
-    enum iovm1_opcode       opcode;
+struct iovm1_work_t {
     iovm1_target            target;
-    uint32_t                address;
+    uint32_t                target_address;
 
     const void              *stream;
     enum iovm1_stream_state stream_state;
@@ -183,62 +184,44 @@ struct iovm1_state_t {
     uint8_t                 comparison;
 };
 
-#ifdef IOVM1_USE_CALLBACKS
-// callback typedef:
-
-typedef void (*iovm1_callback_f)(struct iovm1_state_t *cb_state);
-#else
-// required function implementations by user:
-
-// reads bytes from target.
-void iovm1_read_cb(struct iovm1_state_t *cb_state);
-
-// writes bytes from procedure memory to target.
-void iovm1_write_cb(struct iovm1_state_t *cb_state);
-
-// loops while reading a byte from target while it != comparison byte.
-void iovm1_while_neq_cb(struct iovm1_state_t *cb_state);
-
-// loops while reading a byte from target while it == comparison byte.
-void iovm1_while_eq_cb(struct iovm1_state_t *cb_state);
-#endif
-
 // iovm1_t definition:
 
 struct iovm1_t {
-    // linear memory containing procedure instructions and immediate data
-    struct bslice       m;
+    const void          *stream;
 
     // current state
     enum iovm1_state    s;
+
     // target addresses
     uint32_t            a[IOVM1_TARGET_COUNT];
 
-    // state for resumption:
-    struct iovm1_state_t    cb_state;
+    // working state of current opcode:
+    enum iovm1_opcode   opcode;
+    uint8_t             params[3];
+    struct iovm1_work_t work;
 
 #ifdef IOVM1_USE_USERDATA
-    const void *const       *userdata;
-#endif
-
-#ifdef IOVM1_USE_CALLBACKS
-    iovm1_callback_f        read_cb;
-    iovm1_callback_f        write_cb;
-    iovm1_callback_f        while_neq_cb;
-    iovm1_callback_f        while_eq_cb;
+    const void *const   *userdata;
 #endif
 };
+
+// required function implementations by user:
+
+// reads bytes from target.
+void iovm1_target_read(struct iovm1_work_t *work);
+
+// writes bytes from procedure memory to target.
+void iovm1_target_write(struct iovm1_work_t *work);
+
+// loops while reading a byte from target while it != comparison byte.
+void iovm1_target_while_neq(struct iovm1_work_t *work);
+
+// loops while reading a byte from target while it == comparison byte.
+void iovm1_target_while_eq(struct iovm1_work_t *work);
 
 // core functions:
 
 void iovm1_init(struct iovm1_t *vm);
-
-#ifdef IOVM1_USE_CALLBACKS
-enum iovm1_error iovm1_set_read_cb(struct iovm1_t *vm, iovm1_callback_f cb);
-enum iovm1_error iovm1_set_write_cb(struct iovm1_t *vm, iovm1_callback_f cb);
-enum iovm1_error iovm1_set_while_neq_cb(struct iovm1_t *vm, iovm1_callback_f cb);
-enum iovm1_error iovm1_set_while_eq_cb(struct iovm1_t *vm, iovm1_callback_f cb);
-#endif
 
 #ifdef IOVM1_USE_USERDATA
 enum iovm1_error iovm1_set_userdata(struct iovm1_t *vm, const void *userdata);
@@ -275,76 +258,15 @@ void iovm1_init(struct iovm1_t *vm) {
     vm->userdata = 0;
 #endif
 
-#ifdef IOVM1_USE_CALLBACKS
-    vm->read_cb = 0;
-    vm->write_cb = 0;
-    vm->while_neq_cb = 0;
-    vm->while_eq_cb = 0;
-#endif
-
-    m.ptr = 0;
-    m.len = 0;
-    m.off = 0;
+    vm->stream = 0;
 }
 
-#ifdef IOVM1_USE_CALLBACKS
-enum iovm1_error iovm1_set_read_cb(struct iovm1_t *vm, iovm1_callback_f cb) {
-    if (!cb) {
-        return IOVM1_ERROR_OUT_OF_RANGE;
-    }
-
-    vm->read_cb = cb;
-
-    return IOVM1_SUCCESS;
-}
-
-enum iovm1_error iovm1_set_write_cb(struct iovm1_t *vm, iovm1_callback_f cb) {
-    if (!cb) {
-        return IOVM1_ERROR_OUT_OF_RANGE;
-    }
-
-    vm->write_cb = cb;
-
-    return IOVM1_SUCCESS;
-}
-
-enum iovm1_error iovm1_set_while_neq_cb(struct iovm1_t *vm, iovm1_callback_f cb) {
-    if (!cb) {
-        return IOVM1_ERROR_OUT_OF_RANGE;
-    }
-
-    vm->while_neq_cb = cb;
-
-    return IOVM1_SUCCESS;
-}
-
-enum iovm1_error iovm1_set_while_eq_cb(struct iovm1_t *vm, iovm1_callback_f cb) {
-    if (!cb) {
-        return IOVM1_ERROR_OUT_OF_RANGE;
-    }
-
-    vm->while_eq_cb = cb;
-
-    return IOVM1_SUCCESS;
-}
-#  define IOVM1_INVOKE_CALLBACK(name, ...) vm->name(__VA_ARGS__)
-#else
-#  define IOVM1_INVOKE_CALLBACK(name, ...) iovm1_##name(__VA_ARGS__)
-#endif
-
-enum iovm1_error iovm1_load(struct iovm1_t *vm, const uint8_t *proc, unsigned len) {
+enum iovm1_error iovm1_load(struct iovm1_t *vm, const void *stream) {
     if (s != IOVM1_STATE_INIT) {
         return IOVM1_ERROR_VM_INVALID_OPERATION_FOR_STATE;
     }
 
-    // bounds checking:
-    if (!proc) {
-        return IOVM1_ERROR_OUT_OF_RANGE;
-    }
-
-    m.ptr = proc;
-    m.len = len;
-    m.off = 0;
+    vm->stream = stream;
 
     s = IOVM1_STATE_LOADED;
 
@@ -375,9 +297,10 @@ enum iovm1_error iovm1_exec_reset(struct iovm1_t *vm) {
     return IOVM1_SUCCESS;
 }
 
+#define o vm->opcode
 #define a vm->a
-#define cb_state vm->cb_state
-#define t cb_state.target
+#define work vm->work
+#define t work.target
 
 // executes the IOVM procedure instructions up to and including the next callback and then returns immediately after
 static inline enum iovm1_error iovm1_exec(struct iovm1_t *vm) {
@@ -395,8 +318,17 @@ static inline enum iovm1_error iovm1_exec(struct iovm1_t *vm) {
         s = IOVM1_STATE_EXECUTE_NEXT;
     }
 
+    if (s == IOVM1_STATE_STALLED) {
+
+        return IOVM1_SUCCESS;
+    }
+
     while (s == IOVM1_STATE_EXECUTE_NEXT) {
-        uint8_t x = m.ptr[m.off++];
+        uint8_t x = iovm1_stream_read_byte(vm->stream, &vm->stream_state);
+        if (vm->stream_state == IOVM1_STREAM_STALLED) {
+            s = IOVM1_STATE_STALLED;
+            return IOVM1_SUCCESS;
+        }
 
         cb_state.opcode = IOVM1_INST_OPCODE(x);
         if (cb_state.opcode == IOVM1_OPCODE_END) {
@@ -430,7 +362,7 @@ static inline enum iovm1_error iovm1_exec(struct iovm1_t *vm) {
 
                 cb_state.i_data = m;
                 cb_state.address = a[t];
-                IOVM1_INVOKE_CALLBACK(read_cb, &cb_state);
+                iovm1_target_read(&cb_state);
                 a[t] = cb_state.address;
 
                 return IOVM1_SUCCESS;
@@ -441,7 +373,7 @@ static inline enum iovm1_error iovm1_exec(struct iovm1_t *vm) {
 
                 cb_state.i_data = m;
                 cb_state.address = a[t];
-                IOVM1_INVOKE_CALLBACK(read_cb, &cb_state);
+                iovm1_target_read(&cb_state);
 
                 return IOVM1_SUCCESS;
             }
@@ -452,7 +384,7 @@ static inline enum iovm1_error iovm1_exec(struct iovm1_t *vm) {
                 cb_state.len = c;
                 cb_state.i_data = m;
                 cb_state.address = a[t];
-                IOVM1_INVOKE_CALLBACK(write_cb, &cb_state);
+                iovm1_target_write(&cb_state);
 
                 if (m.off + c >= m.len) {
                     // stall until the next buffer comes in:
@@ -471,7 +403,7 @@ static inline enum iovm1_error iovm1_exec(struct iovm1_t *vm) {
                 cb_state.len = c;
                 cb_state.i_data = m;
                 cb_state.address = a[t];
-                IOVM1_INVOKE_CALLBACK(write_cb, &cb_state);
+                iovm1_target_write(&cb_state);
 
                 if (m.off + c >= m.len) {
                     // stall until the next buffer comes in:
@@ -488,7 +420,7 @@ static inline enum iovm1_error iovm1_exec(struct iovm1_t *vm) {
 
                 cb_state.i_data = m;
                 cb_state.address = a[t];
-                IOVM1_INVOKE_CALLBACK(while_neq_cb, &cb_state);
+                iovm1_target_while_neq(&cb_state);
 
                 return IOVM1_SUCCESS;
             }
@@ -497,7 +429,7 @@ static inline enum iovm1_error iovm1_exec(struct iovm1_t *vm) {
 
                 cb_state.i_data = m;
                 cb_state.address = a[t];
-                IOVM1_INVOKE_CALLBACK(while_eq_cb, &cb_state);
+                iovm1_target_while_eq(&cb_state);
 
                 return IOVM1_SUCCESS;
             }

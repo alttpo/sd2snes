@@ -477,7 +477,7 @@ int usbint_handler(void) {
     return ret;
 }
 
-void iovm1_read_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_address, unsigned len) {
+void iovm1_target_read(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_address, unsigned len) {
     (void) p_vm;
 
     if (len == 0) return;
@@ -515,7 +515,7 @@ void iovm1_read_n_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t address
     }
 }
 
-void iovm1_write_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_address, const uint8_t *i_data, unsigned len) {
+void iovm1_target_write(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_address, const uint8_t *i_data, unsigned len) {
     (void) p_vm;
 
     if (len == 0) return;
@@ -565,7 +565,7 @@ void iovm1_write_n_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t addres
     }
 }
 
-void iovm1_while_neq_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t address, uint8_t comparison) {
+void iovm1_target_while_neq(struct iovm1_t *p_vm, iovm1_target target, uint32_t address, uint8_t comparison) {
     switch (target) {
         case IOVM1_TARGET_SRAM:
             // initialize 16.666ms deadline timer:
@@ -622,7 +622,7 @@ void iovm1_while_neq_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t addr
     }
 }
 
-void iovm1_while_eq_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t address, uint8_t comparison) {
+void iovm1_target_while_eq(struct iovm1_t *p_vm, iovm1_target target, uint32_t address, uint8_t comparison) {
     switch (target) {
         case IOVM1_TARGET_SRAM:
             // initialize 16.666ms deadline timer:
@@ -756,12 +756,12 @@ int usbint_handler_cmd(void) {
         // initialize vm:
         iovm1_init(&vm);
 #ifdef IOVM1_USE_CALLBACKS
-        iovm1_set_read_cb(&vm, iovm1_read_cb);
+        iovm1_set_read_cb(&vm, iovm1_target_read);
         iovm1_set_read_n_cb(&vm, iovm1_read_n_cb);
-        iovm1_set_write_cb(&vm, iovm1_write_cb);
+        iovm1_set_write_cb(&vm, iovm1_target_write);
         iovm1_set_write_n_cb(&vm, iovm1_write_n_cb);
-        iovm1_set_while_neq_cb(&vm, iovm1_while_neq_cb);
-        iovm1_set_while_eq_cb(&vm, iovm1_while_eq_cb);
+        iovm1_set_while_neq_cb(&vm, iovm1_target_while_neq);
+        iovm1_set_while_eq_cb(&vm, iovm1_target_while_eq);
 #endif
 
         // copy procedure from command buffer to vm_procedure:
