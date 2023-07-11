@@ -59,6 +59,34 @@ void clock_init() {
   LPC_TIM3->TCR=1;                         // start the counter
 /* enable FPGA clock output */
   GPIO_MODE_AF(FPGA_CLKREG, FPGA_CLKBIT, 3); /* MAT3.x (FPGA clock) */
+
+#if 1
+  // Configure JTAG pins as JTAG
+  LPC_PINCON->PINSEL3 |= 0x0000000F;
+
+  // Enable JTAG interface
+  LPC_SC->SCS |= 0x00000001;
+
+  // Enable JTAG access to all memories
+  //LPC_SC->MEMMAP |= 0x00000003;
+#else
+#define DAP_BASE    0x50000000UL   // Debug Access Port base address
+
+  // Configure SWD pins
+  LPC_PINCON->PINSEL1 &= ~(3 << 20); // Clear bits 20-21 (P0.26)
+  LPC_PINCON->PINSEL1 &= ~(3 << 22); // Clear bits 22-23 (P0.27)
+  LPC_PINCON->PINSEL1 |= (1 << 20); // Set bits 20-21 to 01 (P0.26)
+  LPC_PINCON->PINSEL1 |= (1 << 22); // Set bits 22-23 to 01 (P0.27)
+
+  // Enable SWD
+  LPC_SC->PCONP |= (1 << 15); // Enable power to the DAP
+  LPC_SC->PCLKSEL1 &= ~(3 << 20); // Set DAP clock to CCLK/4
+  LPC_SC->PCLKSEL1 |= (1 << 20);
+  LPC_SC->DMAREQSEL &= ~(1 << 1); // Use SWD interface for debug requests
+  *(volatile uint32_t *)(DAP_BASE + 0xF4) |= 0x07; // Enable SWD, SWDIO and SWCLK drivers
+
+#undef DAP_BASE
+#endif
 }
 
 void setFlashAccessTime(uint8_t clocks) {

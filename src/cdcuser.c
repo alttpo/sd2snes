@@ -78,6 +78,12 @@ typedef struct __CDC_BUF_T {
 
 CDC_BUF_T  CDC_OutBuf;                                 // buffer for all CDC Out data
 
+struct usbrc_t {
+  uint32_t delta;
+} usbrc[64];
+uint32_t usbi = 0;
+uint32_t usblastcnt = 0;
+
 /*----------------------------------------------------------------------------
   read data from CDC_OutBuf
  *---------------------------------------------------------------------------*/
@@ -138,6 +144,13 @@ int CDC_OutBufAvailChar (int *availChar) {
   Return Value: None
  *---------------------------------------------------------------------------*/
 void CDC_Init (char portNum ) {
+
+  CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+  DWT->CYCCNT = 0;
+  DWT->CTRL &= ~DWT_CTRL_NOCYCCNT_Msk;
+  DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
+  usblastcnt = DWT->CYCCNT;
 
   CDC_DepInEmpty  = 1;
   CDC_SerialState = CDC_GetSerialState();
@@ -413,11 +426,40 @@ void CDC_BulkIn(void) {
   Return Value: none
  *---------------------------------------------------------------------------*/
 void CDC_BulkOut(void) {
-  int numBytesRead;
+  uint32_t numBytesRead;
 
   // get data from USB into intermediate buffer
   if ( /*!cdc_bulkIN_occupied &&*/ !usbint_server_busy()) {
     numBytesRead = USB_ReadEP(CDC_DEP_OUT, &BulkBufOut[0]);
+
+    if (numBytesRead > 0) {
+      // record how often and how much data we get each transfer:
+      uint32_t t = DWT->CYCCNT;
+      usbrc[usbi].delta = t - usblastcnt;
+      usblastcnt = t;
+
+#if 0
+      if (usbi == 0) {
+        // every 64 transfers, send back the last full reading of timings:
+        while (CDC_block_send((uint8_t *) usbrc, sizeof(usbrc)) == -1);
+      }
+#else
+      // reply back immediately:
+      USB_DisableIRQ();
+
+      // *interrupt
+      while ( !Endpoint_IsINReady() ) {	/*-- Wait until ready --*/
+        delay_us(10);
+      }
+
+      // *interrupt
+      USB_WriteEP (CDC_DEP_IN, (uint8_t*)&usbrc[usbi], 64);
+      USB_EnableIRQ();
+#endif
+
+      usbi = (usbi + 1) & 63;
+    }
+    return;
 
     // ... add code to check for overwrite
 

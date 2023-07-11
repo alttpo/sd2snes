@@ -128,8 +128,8 @@ enum usbint_server_stream_state_e { FOREACH_SERVER_STREAM_STATE(GENERATE_ENUM) }
   OP(USBINT_SERVER_OPCODE_SRAM_ENABLE)          \
   OP(USBINT_SERVER_OPCODE_SRAM_WRITE)           \
                                                 \
-  OP(USBINT_SERVER_OPCODE_IOVM_UPLOAD)            \
-  OP(USBINT_SERVER_OPCODE_IOVM_EXEC)              \
+  OP(USBINT_SERVER_OPCODE_IOVM_UPLOAD)          \
+  OP(USBINT_SERVER_OPCODE_IOVM_EXEC)            \
                                                 \
   OP(USBINT_SERVER_OPCODE_MGET)                 \
                                                 \
