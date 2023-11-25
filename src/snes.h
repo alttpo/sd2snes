@@ -195,6 +195,5 @@ void recalculate_sram_range(void);
 
 void snes_enable_sram_write(int enabled);
 void snes_do_sram_write(void);
-int snes_wait_nmi(void);
 
 #endif
