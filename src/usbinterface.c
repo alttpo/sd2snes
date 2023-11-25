@@ -128,10 +128,7 @@ enum usbint_server_stream_state_e { FOREACH_SERVER_STREAM_STATE(GENERATE_ENUM) }
   OP(USBINT_SERVER_OPCODE_SRAM_ENABLE)          \
   OP(USBINT_SERVER_OPCODE_SRAM_WRITE)           \
                                                 \
-  OP(USBINT_SERVER_OPCODE_IOVM_UPLOAD)            \
-  OP(USBINT_SERVER_OPCODE_IOVM_EXEC)              \
-                                                \
-  OP(USBINT_SERVER_OPCODE_MGET)                 \
+  OP(USBINT_SERVER_OPCODE_IOVM_EXEC)            \
                                                 \
   OP(USBINT_SERVER_OPCODE__COUNT)
 enum usbint_server_opcode_e { FOREACH_SERVER_OPCODE(GENERATE_ENUM) };
@@ -157,7 +154,7 @@ static const char *usbint_server_space_s[] = { FOREACH_SERVER_SPACE(GENERATE_STR
   OP(USBINT_SERVER_FLAGS_CLRX=4)               \
   OP(USBINT_SERVER_FLAGS_SETX=8)               \
   OP(USBINT_SERVER_FLAGS_STREAMBURST=16)       \
-  OP(USBINT_SERVER_FLAGS_WAIT_FOR_NMI=32)      \
+  OP(USBINT_SERVER_FLAGS_SIZE_BIT9=32)         \
   OP(USBINT_SERVER_FLAGS_NORESP=64)            \
   OP(USBINT_SERVER_FLAGS_64BDATA=128)
 enum usbint_server_flags_e { FOREACH_SERVER_FLAGS(GENERATE_ENUM) };
@@ -168,16 +165,9 @@ volatile enum usbint_server_stream_state_e stream_state;
 static int reset_state = 0;
 volatile static int cmdDat = 0;
 volatile static unsigned connected = 0;
-#define USBINT_MGET_MAX_REQUESTS 18
 
-#define IOVM1_TARGET_SRAM       0
-#define IOVM1_TARGET_SNESCMD    1
-
-unsigned vm_read_len = 0;
-unsigned vm_read_remain_offs = 0;
-uint8_t vm_procedure[512-7];
-uint8_t vm_readbuf[256];
 struct iovm1_t vm;
+uint8_t vm_procedure[512-7];
 
 struct usbint_server_info_t {
   enum usbint_server_opcode_e opcode;
@@ -193,11 +183,9 @@ struct usbint_server_info_t {
   // vector operations
   uint32_t vector_count;
 
-  uint32_t vector_total;
-  uint32_t vector_addr[USBINT_MGET_MAX_REQUESTS];
-  uint16_t vector_size[USBINT_MGET_MAX_REQUESTS];
-
-  uint8_t wait_for_nmi;
+  uint8_t c;    // memory chip
+  uint24_t a;   // linear address within memory chip
+  int *vm_bytes_sent;
 
   uint8_t data_ready;
   int error;
@@ -260,7 +248,7 @@ void usbint_recv_flit(const unsigned char *in, int length) {
             server_info.cmd_size = USB_BLOCK_SIZE;
         }
         else if (old_recv_buffer_offset < 64 && 64 <= recv_buffer_offset) {
-            server_info.cmd_size = (recv_buffer[4] == USBINT_SERVER_OPCODE_VGET || recv_buffer[4] == USBINT_SERVER_OPCODE_MGET || recv_buffer[4] == USBINT_SERVER_OPCODE_VPUT) ? 64 : 512;
+            server_info.cmd_size = (recv_buffer[4] == USBINT_SERVER_OPCODE_VGET || recv_buffer[4] == USBINT_SERVER_OPCODE_IOVM_EXEC || recv_buffer[4] == USBINT_SERVER_OPCODE_VPUT) ? 64 : 512;
         }
     }
 
@@ -337,12 +325,6 @@ void usbint_recv_block(void) {
         else {
             // write SRAM or CONFIG
             UINT blockBytesWritten = 0;
-
-            // wait for NMI before writing data:
-            if (server_info.wait_for_nmi) {
-                (void) snes_wait_nmi();
-                server_info.wait_for_nmi = 0;
-            }
 
             //PRINT_MSG("[ dat]");
             do {
@@ -477,208 +459,6 @@ int usbint_handler(void) {
     return ret;
 }
 
-void iovm1_target_read(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_address, unsigned len) {
-    (void) p_vm;
-
-    if (len == 0) return;
-
-    vm_read_len = len;
-    vm_read_remain_offs = 0;
-    switch (target) {
-        case IOVM1_TARGET_SRAM:
-            *r_address += sram_readblock(vm_readbuf, *r_address, len);
-            break;
-        case IOVM1_TARGET_SNESCMD:
-            *r_address += snescmd_readblock(vm_readbuf, *r_address, len);
-            break;
-        default:
-            return;
-    }
-}
-
-void iovm1_read_n_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t address, unsigned len) {
-    (void) p_vm;
-
-    if (len == 0) return;
-
-    vm_read_len = len;
-    vm_read_remain_offs = 0;
-    switch (target) {
-        case IOVM1_TARGET_SRAM:
-            sram_readblock(vm_readbuf, address, len);
-            break;
-        case IOVM1_TARGET_SNESCMD:
-            snescmd_readblock(vm_readbuf, address, len);
-            break;
-        default:
-            return;
-    }
-}
-
-void iovm1_target_write(struct iovm1_t *p_vm, iovm1_target target, uint32_t *r_address, const uint8_t *i_data, unsigned len) {
-    (void) p_vm;
-
-    if (len == 0) return;
-
-    switch (target) {
-        case IOVM1_TARGET_SRAM:
-            *r_address += sram_writeblock(i_data, *r_address, len);
-            break;
-        case IOVM1_TARGET_SNESCMD: {
-            uint32_t addr = *r_address;
-            if (addr == 0x2C00) {
-                // write to special $2C00 byte last:
-                snescmd_writeblock(i_data+1, addr+1, len-1);
-                snescmd_writebyte(*i_data, addr);
-                *r_address += len;
-            } else {
-                *r_address += snescmd_writeblock(i_data, *r_address, len);
-            }
-            break;
-        }
-        default:
-            return;
-    }
-}
-
-void iovm1_write_n_cb(struct iovm1_t *p_vm, iovm1_target target, uint32_t address, const uint8_t *i_data, unsigned len) {
-    (void) p_vm;
-
-    if (len == 0) return;
-
-    switch (target) {
-        case IOVM1_TARGET_SRAM:
-            sram_writeblock(i_data, address, len);
-            break;
-        case IOVM1_TARGET_SNESCMD: {
-            if (address == 0x2C00) {
-                // write to special $2C00 byte last:
-                snescmd_writeblock(i_data+1, address+1, len-1);
-                snescmd_writebyte(*i_data, address);
-            } else {
-                snescmd_writeblock(i_data, address, len);
-            }
-            break;
-        }
-        default:
-            return;
-    }
-}
-
-void iovm1_target_while_neq(struct iovm1_t *p_vm, iovm1_target target, uint32_t address, uint8_t comparison) {
-    switch (target) {
-        case IOVM1_TARGET_SRAM:
-            // initialize 16.666ms deadline timer:
-            deadline_us(16666);
-            while (deadline_in_future()) {
-                uint8_t tmp;
-
-                FPGA_SELECT();
-                FPGA_TX_BYTE(FPGA_CMD_SETADDR | FPGA_TGT_MEM);
-                FPGA_TX_BYTE((address >> 16) & 0xff);
-                FPGA_TX_BYTE((address >> 8) & 0xff);
-                FPGA_TX_BYTE((address) & 0xff);
-                FPGA_DESELECT();
-
-                FPGA_SELECT();
-                FPGA_TX_BYTE(0x80); /* READ SRAM no-advance */
-                FPGA_WAIT_RDY();
-                tmp = FPGA_RX_BYTE();
-                FPGA_DESELECT();
-
-                if (tmp == comparison) {
-                    break;
-                }
-            }
-            // clean up deadline timer:
-            deadline_clean_up();
-            break;
-        case IOVM1_TARGET_SNESCMD:
-            // initialize 16.666ms deadline timer:
-            deadline_us(16666);
-            while (deadline_in_future()) {
-                uint8_t tmp;
-
-                FPGA_SELECT();
-                FPGA_TX_BYTE(FPGA_CMD_SNESCMD_SETADDR);
-                FPGA_TX_BYTE(address & 0xff);
-                FPGA_TX_BYTE(address >> 8);
-                FPGA_DESELECT();
-
-                FPGA_SELECT();
-                FPGA_TX_BYTE(FPGA_CMD_SNESCMD_RD_NOAD);
-                tmp = FPGA_RX_BYTE();
-                FPGA_DESELECT();
-
-                if (tmp == comparison) {
-                    break;
-                }
-            }
-            // clean up deadline timer:
-            deadline_clean_up();
-            break;
-        default:
-            break;
-    }
-}
-
-void iovm1_target_while_eq(struct iovm1_t *p_vm, iovm1_target target, uint32_t address, uint8_t comparison) {
-    switch (target) {
-        case IOVM1_TARGET_SRAM:
-            // initialize 16.666ms deadline timer:
-            deadline_us(16666);
-            while (deadline_in_future()) {
-                uint8_t tmp;
-
-                FPGA_SELECT();
-                FPGA_TX_BYTE(FPGA_CMD_SETADDR | FPGA_TGT_MEM);
-                FPGA_TX_BYTE((address >> 16) & 0xff);
-                FPGA_TX_BYTE((address >> 8) & 0xff);
-                FPGA_TX_BYTE((address) & 0xff);
-                FPGA_DESELECT();
-
-                FPGA_SELECT();
-                FPGA_TX_BYTE(0x80); /* READ SRAM no-advance */
-                FPGA_WAIT_RDY();
-                tmp = FPGA_RX_BYTE();
-                FPGA_DESELECT();
-
-                if (tmp != comparison) {
-                    break;
-                }
-            }
-            // clean up deadline timer:
-            deadline_clean_up();
-            break;
-        case IOVM1_TARGET_SNESCMD:
-            // initialize 16.666ms deadline timer:
-            deadline_us(16666);
-            while (deadline_in_future()) {
-                uint8_t tmp;
-
-                FPGA_SELECT();
-                FPGA_TX_BYTE(FPGA_CMD_SNESCMD_SETADDR);
-                FPGA_TX_BYTE(address & 0xff);
-                FPGA_TX_BYTE(address >> 8);
-                FPGA_DESELECT();
-
-                FPGA_SELECT();
-                FPGA_TX_BYTE(FPGA_CMD_SNESCMD_RD_NOAD);
-                tmp = FPGA_RX_BYTE();
-                FPGA_DESELECT();
-
-                if (tmp != comparison) {
-                    break;
-                }
-            }
-            // clean up deadline timer:
-            deadline_clean_up();
-            break;
-        default:
-            break;
-    }
-}
-
 int usbint_handler_cmd(void) {
     int ret = 0;
     uint8_t *fileName = (uint8_t *)cmd_buffer + 256;
@@ -700,8 +480,6 @@ int usbint_handler_cmd(void) {
 
     server_info.offset = 0;
     server_info.error = 0;
-
-    server_info.wait_for_nmi = server_info.flags & USBINT_SERVER_FLAGS_WAIT_FOR_NMI;
 
     memset((unsigned char *)send_buffer[send_buffer_index], 0, USB_BLOCK_SIZE);
 
@@ -744,151 +522,55 @@ int usbint_handler_cmd(void) {
         // immediately writes SRAM contents to SD card:
         snes_do_sram_write();
         break;
-    case USBINT_SERVER_OPCODE_IOVM_UPLOAD: {
-        // uploads an IOVM procedure into memory for execution:
-
-        unsigned len = 512 - 7;
-
+    case USBINT_SERVER_OPCODE_IOVM_EXEC: {
+        // accepts either 64-byte or 512-byte requests
+        // always resets block_size to 64 for responses
+        server_info.size = 0;
         server_info.total_size = 0;
+
+        // make sure we can reply with an error:
+        server_info.flags &= USBINT_SERVER_FLAGS_NORESP;
+        // use 64-byte response blocks for lower latency:
+        server_info.block_size = 64;
+
+        // determine 9-bit length of IOVM program:
+        unsigned len = cmd_buffer[7];
+        if (server_info.flags & USBINT_SERVER_FLAGS_SIZE_BIT9) {
+            len |= 0x100;
+        }
+        // validate length:
+        if (len > server_info.block_size - 8) {
+            server_info.error = 128;
+            break;
+        }
 
         // TODO: turn this into a PUT-like opcode to accept large-ish programs
 
+        // copy procedure from command buffer to vm_procedure:
+        memcpy(vm_procedure, (const uint8_t *) cmd_buffer + 8, len);
+
         // initialize vm:
         iovm1_init(&vm);
-#ifdef IOVM1_USE_CALLBACKS
-        iovm1_set_read_cb(&vm, iovm1_target_read);
-        iovm1_set_read_n_cb(&vm, iovm1_read_n_cb);
-        iovm1_set_write_cb(&vm, iovm1_target_write);
-        iovm1_set_write_n_cb(&vm, iovm1_write_n_cb);
-        iovm1_set_while_neq_cb(&vm, iovm1_target_while_neq);
-        iovm1_set_while_eq_cb(&vm, iovm1_target_while_eq);
-#endif
-
-        // copy procedure from command buffer to vm_procedure:
-        memcpy(vm_procedure, (const uint8_t *) cmd_buffer + 7, len);
 
         // point vm at procedure:
-        server_info.error |= ((int)iovm1_load(&vm, vm_procedure, len) & 3) << 0;
+        server_info.error = iovm1_load(&vm, vm_procedure, len);
         if (server_info.error) {
             break;
         }
 
-        // verify after upload complete
-        server_info.error |= ((int)iovm1_verify(&vm) & 3) << 2;
+        // reset vm to begin execution:
+        server_info.error = iovm1_exec_reset(&vm);
         if (server_info.error) {
             break;
         }
 
-        // get total_read size:
-        server_info.error |= ((int)iovm1_get_total_read(
-            &vm,
-            (uint32_t*)&server_info.total_size
-        ) & 3) << 4;
-        break;
-    }
-    case USBINT_SERVER_OPCODE_IOVM_EXEC: {
-        // resets IOVM for a new execution:
-        server_info.size = 0;
-        server_info.total_size = 0;
+        // don't know how much data up-front will be returned, so just use 1:
+        server_info.size = 1;
+        server_info.total_size = server_info.size;
 
-        // get total_read size:
-        server_info.error |= ((int)iovm1_get_total_read(
-            &vm,
-            (uint32_t*)&server_info.total_size
-        ) & 3) << 0;
-        if (server_info.error) {
-            server_info.size = 0;
-            server_info.total_size = 0;
-            break;
-        }
+        // disable first response block until iovm sends data or ends:
+        server_info.flags |= USBINT_SERVER_FLAGS_NORESP;
 
-        server_info.size = server_info.total_size;
-
-        // reset vm:
-        server_info.error |= ((int)iovm1_exec_reset(&vm) & 3) << 2;
-        if (server_info.error) {
-            server_info.size = 0;
-            server_info.total_size = 0;
-            break;
-        }
-
-        // good to go:
-        vm.a[0] = 0xF50000;
-        vm.a[1] = 0x2C00;
-
-        vm_read_len = 0;
-        vm_read_remain_offs = 0;
-
-        break;
-    }
-    case USBINT_SERVER_OPCODE_MGET: {
-        int i = 7;
-
-        // dont support FILE space:
-        server_info.error = (server_info.space == USBINT_SERVER_SPACE_FILE);
-        if (server_info.error) {
-            break;
-        }
-
-        server_info.size = 0;
-        server_info.offset = 0;
-        server_info.total_size = 0;
-        server_info.vector_count = 0;
-        server_info.vector_total = 0;
-
-        // parse the command to get count of reads and all address/size pairs:
-        while (i < 64) {
-            // count of read operations (0 = end) is first 5 bits:
-            uint8_t x = cmd_buffer[i++];
-            int n = x & 0x1f;
-            if (n == 0) {
-                break;
-            }
-            if (n > USBINT_MGET_MAX_REQUESTS) {
-                // would exceed bounds:
-                server_info.error = 1;
-                break;
-            }
-
-            if (i >= 64) {
-                // would exceed bounds:
-                server_info.error = 1;
-                break;
-            }
-
-            // bank byte of 24-bit address
-            uint32_t b = (uint32_t)cmd_buffer[i++] << 16;
-
-            // calculate address,size pairs:
-            for (int k = 0; k < n; k++, server_info.vector_total++) {
-                if (i + 2 >= 64) {
-                    // would exceed bounds:
-                    server_info.error = 1;
-                    break;
-                }
-
-                uint32_t l = cmd_buffer[i++]; // low byte of 24-bit address
-                uint32_t h = cmd_buffer[i++]; // high byte of 24-bit address
-                uint16_t z = cmd_buffer[i++]; // size (0 -> 256, else 1..255)
-                if (z == 0) { z = 256; }
-
-                server_info.total_size += z;
-
-                server_info.vector_addr[server_info.vector_total] = b | (h << 8) | l;
-                server_info.vector_size[server_info.vector_total] = z;
-            }
-        }
-
-        if (server_info.error) {
-            break;
-        }
-        if (server_info.vector_total == 0) {
-            break;
-        }
-
-        // set up initial read operation:
-        server_info.size = server_info.vector_size[0];
-        server_info.offset = server_info.vector_addr[0];
         break;
     }
     case USBINT_SERVER_OPCODE_VGET:
@@ -1045,7 +727,7 @@ int usbint_handler_cmd(void) {
     PRINT_STATE(server_state);
 
     // decide next state
-    if (server_info.opcode == USBINT_SERVER_OPCODE_GET || server_info.opcode == USBINT_SERVER_OPCODE_VGET || server_info.opcode == USBINT_SERVER_OPCODE_MGET || server_info.opcode == USBINT_SERVER_OPCODE_IOVM_EXEC || server_info.opcode == USBINT_SERVER_OPCODE_LS) {
+    if (server_info.opcode == USBINT_SERVER_OPCODE_GET || server_info.opcode == USBINT_SERVER_OPCODE_VGET || server_info.opcode == USBINT_SERVER_OPCODE_IOVM_EXEC || server_info.opcode == USBINT_SERVER_OPCODE_LS) {
         // we lock on data transfers so use interrupt for everything
         server_state = USBINT_SERVER_STATE_HANDLE_DAT;
     }
@@ -1145,6 +827,289 @@ int usbint_handler_cmd(void) {
     return ret;
 }
 
+// validate the addresses of a read operation with the given length
+enum iovm1_error host_memory_start_read(struct iovm1_t *vm, iovm1_memory_chip_t c, uint24_t a, int l) {
+    (void)vm;
+
+    if (c == MEM_SNES_2C00) {
+        // special case for 2C00 EXE buffer:
+        if (a >= 0x200) {
+            return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+        }
+        if (a + l > 0x200) {
+            return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+        }
+
+        uint16_t addr = 0x2C00 + a;
+
+        FPGA_SELECT();
+        FPGA_TX_BYTE(FPGA_CMD_SNESCMD_SETADDR);
+        FPGA_TX_BYTE(addr & 0xff);
+        FPGA_TX_BYTE(addr >> 8);
+        FPGA_DESELECT();
+    } else {
+        uint24_t addr;
+
+        switch (c) {
+            case MEM_SNES_WRAM: // WRAM:
+                if (a >= 0x20000) {
+                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+                }
+                if (a + l > 0x20000) {
+                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+                }
+                addr = 0xF50000 + a;
+                break;
+            case MEM_SNES_VRAM: // VRAM:
+                if (a >= 0x10000) {
+                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+                }
+                if (a + l > 0x10000) {
+                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+                }
+                addr = 0xF70000 + a;
+                break;
+            case MEM_SNES_CGRAM: // CGRAM:
+                if (a >= 0x200) {
+                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+                }
+                if (a + l > 0x200) {
+                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+                }
+                addr = 0xF90000 + a;
+                break;
+            case MEM_SNES_OAM: // OAM:
+                if (a >= 0x220) {
+                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+                }
+                if (a + l > 0x220) {
+                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+                }
+                addr = 0xF90200 + a;
+                break;
+            case MEM_SNES_ARAM: // APURAM:
+                if (a >= 0x10000) {
+                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+                }
+                if (a + l > 0x10000) {
+                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+                }
+                addr = 0xF80000 + a;
+                break;
+            case MEM_SNES_ROM: // ROM:
+                if (a >= 0xE00000) {
+                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+                }
+                if (a + l > 0xE00000) {
+                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+                }
+                addr = 0x000000 + a;
+                break;
+            case MEM_SNES_SRAM: // SRAM:
+                if (a >= 0x150000) {
+                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+                }
+                if (a + l > 0x150000) {
+                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+                }
+                addr = 0xE00000 + a;
+                break;
+            default: // memory chip not defined:
+                return IOVM1_ERROR_MEMORY_CHIP_UNDEFINED;
+        }
+
+        FPGA_SELECT();
+        FPGA_TX_BYTE(FPGA_CMD_SETADDR | FPGA_TGT_MEM);
+        FPGA_TX_BYTE((addr >> 16) & 0xff);
+        FPGA_TX_BYTE((addr >> 8) & 0xff);
+        FPGA_TX_BYTE((addr) & 0xff);
+        FPGA_DESELECT();
+    }
+
+    server_info.c = c;
+    server_info.a = a;
+    return IOVM1_SUCCESS;
+}
+
+// validate the addresses of a write operation with the given length
+enum iovm1_error host_memory_start_write(struct iovm1_t *vm, iovm1_memory_chip_t c, uint24_t a, int l) {
+    (void)vm;
+
+    if (c == MEM_SNES_2C00) {
+        // special case for 2C00 EXE buffer:
+        if (a >= 0x200) {
+            return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+        }
+        if (a + l > 0x200) {
+            return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+        }
+
+        uint16_t addr = 0x2C00 + a;
+
+        FPGA_SELECT();
+        FPGA_TX_BYTE(FPGA_CMD_SNESCMD_SETADDR);
+        FPGA_TX_BYTE(addr & 0xff);
+        FPGA_TX_BYTE(addr >> 8);
+        FPGA_DESELECT();
+    } else {
+        uint24_t addr;
+
+        switch (c) {
+            case MEM_SNES_WRAM: // WRAM:
+            case MEM_SNES_VRAM: // VRAM:
+            case MEM_SNES_CGRAM: // CGRAM:
+            case MEM_SNES_OAM: // OAM:
+            case MEM_SNES_ARAM: // APURAM:
+                return IOVM1_ERROR_MEMORY_CHIP_NOT_WRITABLE;
+            case MEM_SNES_ROM: // ROM:
+                if (a >= 0xE00000) {
+                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+                }
+                if (a + l > 0xE00000) {
+                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+                }
+                addr = 0x000000 + a;
+                break;
+            case MEM_SNES_SRAM: // SRAM:
+                if (a >= 0x150000) {
+                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+                }
+                if (a + l > 0x150000) {
+                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+                }
+                addr = 0xE00000 + a;
+                break;
+            default: // memory chip not defined:
+                return IOVM1_ERROR_MEMORY_CHIP_UNDEFINED;
+        }
+
+        FPGA_SELECT();
+        FPGA_TX_BYTE(FPGA_CMD_SETADDR | FPGA_TGT_MEM);
+        FPGA_TX_BYTE((addr >> 16) & 0xff);
+        FPGA_TX_BYTE((addr >> 8) & 0xff);
+        FPGA_TX_BYTE((addr) & 0xff);
+        FPGA_DESELECT();
+    }
+
+    server_info.c = c;
+    server_info.a = a;
+    return IOVM1_SUCCESS;
+}
+
+// read a byte and advance the chip address forward by 1 byte
+uint8_t host_memory_read_auto_advance(struct iovm1_t *vm) {
+    (void)vm;
+
+    if (server_info.c == MEM_SNES_2C00) {
+        uint8_t data;
+        FPGA_SELECT();
+        FPGA_TX_BYTE(FPGA_CMD_SNESCMD_READ);
+        data = FPGA_RX_BYTE();
+        FPGA_DESELECT();
+        return data;
+    } else {
+        uint8_t data;
+        FPGA_SELECT();
+        FPGA_TX_BYTE(FPGA_CMD_READMEM | FPGA_MEM_AUTOINC);
+        FPGA_WAIT_RDY();
+        data = FPGA_RX_BYTE();
+        FPGA_DESELECT();
+        return data;
+    }
+}
+
+// read a byte and do not advance the chip address; useful for continuously polling a specific address
+uint8_t host_memory_read_no_advance(struct iovm1_t *vm) {
+    (void)vm;
+
+    if (server_info.c == MEM_SNES_2C00) {
+        uint8_t data;
+        FPGA_SELECT();
+        FPGA_TX_BYTE(FPGA_CMD_SNESCMD_RD_NOAD);
+        data = FPGA_RX_BYTE();
+        FPGA_DESELECT();
+        return data;
+    } else {
+        uint8_t data;
+        FPGA_SELECT();
+        FPGA_TX_BYTE(FPGA_CMD_READMEM);
+        FPGA_WAIT_RDY();
+        data = FPGA_RX_BYTE();
+        FPGA_DESELECT();
+        return data;
+    }
+}
+
+// write a byte and advance the chip address forward by 1 byte
+void host_memory_write_auto_advance(struct iovm1_t *vm, uint8_t b) {
+    (void)vm;
+
+    if (server_info.c == MEM_SNES_2C00) {
+        FPGA_SELECT();
+        FPGA_TX_BYTE(FPGA_CMD_SNESCMD_WRITE);
+        FPGA_TX_BYTE(b);
+        FPGA_TX_BYTE(0x00);
+        FPGA_DESELECT();
+    } else {
+        FPGA_SELECT();
+        FPGA_TX_BYTE(FPGA_CMD_WRITEMEM | FPGA_MEM_AUTOINC);
+        FPGA_TX_BYTE(b);
+        FPGA_WAIT_RDY();
+        FPGA_DESELECT();
+    }
+}
+
+// initialize a host-side countdown timer to a timeout value for WAIT operation, e.g. duration of a single video frame
+void host_timer_reset(struct iovm1_t *vm) {
+    (void)vm;
+    deadline_us(16667);
+}
+
+// checks if the host-side countdown timer has elapsed down to or below 0
+bool host_timer_elapsed(struct iovm1_t *vm) {
+    (void)vm;
+    return !deadline_in_future();
+}
+
+// stops the host-side countdown timer and releases any resources
+void host_timer_cleanup(struct iovm1_t *vm) {
+    (void)vm;
+    deadline_clean_up();
+}
+
+static void send_byte(uint8_t b) {
+    send_buffer[send_buffer_index][(*server_info.vm_bytes_sent)++] = b;
+
+    if (*server_info.vm_bytes_sent >= server_info.block_size) {
+        // flush buffer to USB:
+        usbint_send_block(server_info.block_size);
+        *server_info.vm_bytes_sent = 0;
+    }
+}
+
+// send a program-end message to the client
+void host_send_end(struct iovm1_t *vm) {
+    send_byte(0xFF);
+    send_byte(vm->e);
+}
+// send an abort message to the client
+void host_send_abort(struct iovm1_t *vm) {
+    send_byte(0xFF);
+    send_byte(vm->e);
+}
+// send a read-complete message to the client with the fully read data up to 256 bytes in length
+void host_send_read(struct iovm1_t *vm, uint8_t l, uint8_t *d) {
+    (void)vm;
+    send_byte(0xFE);
+    send_byte(l);
+
+    int len = l;
+    if (len == 0) { len = 256; }
+    while (len--) {
+        send_byte(*d++);
+    }
+}
+
 int usbint_handler_dat(void) {
     int ret = 0;
     static int count = 0;
@@ -1153,115 +1118,40 @@ int usbint_handler_dat(void) {
 
     if (!server_info.data_ready) return ret;
 
-    // wait for NMI:
-    if (server_info.wait_for_nmi) {
-        (void) snes_wait_nmi();
-        server_info.wait_for_nmi = 0;
-    }
-
     switch (server_info.opcode) {
     case USBINT_SERVER_OPCODE_IOVM_EXEC: {
         enum iovm1_state state;
-        do {
-            enum iovm1_error r;
 
-            if (vm_read_remain_offs == 0) {
-                // move the state machine forward one step:
-                r = iovm1_exec(&vm);
-                if (r) {
-                    // TODO: this goes nowhere.
-                    server_info.error = (int) r;
-                    count = server_info.size;
+        // keep the USBA header and error/flags:
+        bytesSent = 6;
+        if (!server_info.error) {
+            // number of bytes filled in the send_buffer:
+            server_info.vm_bytes_sent = &bytesSent;
+
+            do {
+                // move the state machine forward one instruction or read/write/wait loop iteration:
+                server_info.error = iovm1_exec(&vm);
+                if (server_info.error) {
                     break;
                 }
-            }
 
-            if (bytesSent + vm_read_len > server_info.block_size) {
-                // copy what we have into this block and put the rest in the next block:
-                size_t partial = server_info.block_size - bytesSent;
-                memcpy(
-                    (uint8_t *)send_buffer[send_buffer_index] + bytesSent,
-                    vm_readbuf+vm_read_remain_offs,
-                    partial
-                );
-                bytesSent += partial;
-                count += partial;
-                vm_read_remain_offs = partial;
-                vm_read_len -= partial;
-            } else if (vm_read_len) {
-                // copy in the data read:
-                memcpy(
-                    (uint8_t *)send_buffer[send_buffer_index] + bytesSent,
-                    vm_readbuf+vm_read_remain_offs,
-                    vm_read_len
-                );
-                bytesSent += vm_read_len;
-                count += vm_read_len;
-                vm_read_len = 0;
-                vm_read_remain_offs = 0;
-            }
+                // within iovm1_exec(), the host_send_*() functions are invoked to send data to the USB client.
 
-            state = iovm1_get_exec_state(&vm);
-        } while (bytesSent != server_info.block_size && state != IOVM1_STATE_ENDED);
-
-        if (state == IOVM1_STATE_ENDED) {
-            count = server_info.size;
-            vm_read_len = 0;
-            vm_read_remain_offs = 0;
+                state = iovm1_get_exec_state(&vm);
+            } while (state < IOVM1_STATE_ENDED);
         }
-        break;
-    }
-    case USBINT_SERVER_OPCODE_MGET: {
-        // fill up one 64-byte response block:
-        do {
-            UINT bytesRead = 0;
-            UINT remainingBytes = min(server_info.block_size - bytesSent, server_info.size - count);
 
-            if (server_info.space == USBINT_SERVER_SPACE_SNES) {
-                bytesRead = sram_readblock(
-                    (uint8_t *)send_buffer[send_buffer_index] + bytesSent,
-                    server_info.offset + count,
-                    remainingBytes
-                );
-            }
-            else if (server_info.space == USBINT_SERVER_SPACE_MSU) {
-                bytesRead = msu_readblock(
-                    (uint8_t *)send_buffer[send_buffer_index] + bytesSent,
-                    server_info.offset + count,
-                    remainingBytes
-                );
-            }
-            else if (server_info.space == USBINT_SERVER_SPACE_CMD) {
-                bytesRead = snescmd_readblock(
-                    (uint8_t *)send_buffer[send_buffer_index] + bytesSent,
-                    server_info.offset + count,
-                    remainingBytes
-                );
-            }
-            else {
-                // config
-                uint8_t group = server_info.size & 0xFF;
-                uint8_t index = server_info.offset & 0xFF;
-                uint8_t data  = fpga_read_config(group, index);
-                //printf(" [CONFIG_RD] %2x %2x %2x ", group, index, data);
-                *(uint8_t *)(send_buffer[send_buffer_index] + bytesSent) = data;
-                bytesRead = 1;
-                server_info.size = 1; // reset size/group-valid field
-            }
-            bytesSent += bytesRead;
-            count += bytesRead;
-
-            if (count == server_info.size) {
-                server_info.vector_count++;
-                if (server_info.vector_count < server_info.vector_total) {
-                    // set up next read operation:
-                    server_info.size = server_info.vector_size[server_info.vector_count];
-                    server_info.offset = server_info.vector_addr[server_info.vector_count];
-                    count = 0;
-                }
-            }
-        } while (bytesSent != server_info.block_size && count < server_info.size);
-        break;
+        // finish command:
+        server_info.data_ready = 0;
+        server_state = USBINT_SERVER_STATE_IDLE;
+        if (bytesSent > 0) {
+            // clear out any remaining portion of the buffer
+            memset((unsigned char *)send_buffer[send_buffer_index] + bytesSent, 0x00, server_info.block_size - bytesSent);
+            // send the final block:
+            usbint_send_block(server_info.block_size);
+        }
+        // don't use the quirky logic beyond the switch block:
+        return ret;
     }
     case USBINT_SERVER_OPCODE_VGET:
     case USBINT_SERVER_OPCODE_GET: {

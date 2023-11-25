@@ -82,6 +82,7 @@ SRC += memory.c filetypes.c faulthandler.c sort.c crc32.c cic.c
 SRC += cli.c xmodem.c rle.c msu1.c crc16.c sysinfo.c
 SRC += cfg.c cheat.c yaml.c savestate.c sgb.c hwinfo.c
 SRC += usbdesc.c usbcore.c usbuser.c cdcuser.c usbinterface.c
+SRC += iovm/iovm.c
 
 # List Assembler source files here.
 #     Make them always end in a capital .S.  Files ending in a lowercase .s
