@@ -1105,7 +1105,7 @@ void host_send_read(struct iovm1_t *vm, uint8_t l, uint8_t *d) {
 
     int len = l;
     if (len == 0) { len = 256; }
-    while (len--) {
+    while (len-- > 0) {
         send_byte(*d++);
     }
 }
@@ -1113,6 +1113,7 @@ void host_send_read(struct iovm1_t *vm, uint8_t l, uint8_t *d) {
 int usbint_handler_dat(void) {
     int ret = 0;
     static int count = 0;
+    static int reentrant = 0;
     int bytesSent = 0;
     int streamEnd = 0;
 
@@ -1121,6 +1122,11 @@ int usbint_handler_dat(void) {
     switch (server_info.opcode) {
     case USBINT_SERVER_OPCODE_IOVM_EXEC: {
         enum iovm1_state state;
+
+        if (reentrant) {
+            return ret;
+        }
+        reentrant = -1;
 
         // keep the USBA header and error/flags:
         bytesSent = 6;
@@ -1150,7 +1156,9 @@ int usbint_handler_dat(void) {
             // send the final block:
             usbint_send_block(server_info.block_size);
         }
+
         // don't use the quirky logic beyond the switch block:
+        reentrant = 0;
         return ret;
     }
     case USBINT_SERVER_OPCODE_VGET:
