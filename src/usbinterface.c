@@ -827,254 +827,107 @@ int usbint_handler_cmd(void) {
     return ret;
 }
 
-// validate the addresses of a read operation with the given length
-enum iovm1_error host_memory_start_read(struct iovm1_t *vm, iovm1_memory_chip_t c, uint24_t a, int l) {
-    (void)vm;
-
-    if (c == MEM_SNES_2C00) {
-        // special case for 2C00 EXE buffer:
-        if (a >= 0x200) {
-            return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-        }
-        if (a + l > 0x200) {
-            return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-        }
-
-        uint16_t addr = 0x2C00 + a;
-
-        FPGA_SELECT();
-        FPGA_TX_BYTE(FPGA_CMD_SNESCMD_SETADDR);
-        FPGA_TX_BYTE(addr & 0xff);
-        FPGA_TX_BYTE(addr >> 8);
-        FPGA_DESELECT();
-    } else {
-        uint24_t addr;
-
-        switch (c) {
-            case MEM_SNES_WRAM: // WRAM:
-                if (a >= 0x20000) {
-                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-                }
-                if (a + l > 0x20000) {
-                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-                }
-                addr = 0xF50000 + a;
-                break;
-            case MEM_SNES_VRAM: // VRAM:
-                if (a >= 0x10000) {
-                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-                }
-                if (a + l > 0x10000) {
-                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-                }
-                addr = 0xF70000 + a;
-                break;
-            case MEM_SNES_CGRAM: // CGRAM:
-                if (a >= 0x200) {
-                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-                }
-                if (a + l > 0x200) {
-                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-                }
-                addr = 0xF90000 + a;
-                break;
-            case MEM_SNES_OAM: // OAM:
-                if (a >= 0x220) {
-                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-                }
-                if (a + l > 0x220) {
-                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-                }
-                addr = 0xF90200 + a;
-                break;
-            case MEM_SNES_ARAM: // APURAM:
-                if (a >= 0x10000) {
-                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-                }
-                if (a + l > 0x10000) {
-                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-                }
-                addr = 0xF80000 + a;
-                break;
-            case MEM_SNES_ROM: // ROM:
-                if (a >= 0xE00000) {
-                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-                }
-                if (a + l > 0xE00000) {
-                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-                }
-                addr = 0x000000 + a;
-                break;
-            case MEM_SNES_SRAM: // SRAM:
-                if (a >= 0x150000) {
-                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-                }
-                if (a + l > 0x150000) {
-                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-                }
-                addr = 0xE00000 + a;
-                break;
-            default: // memory chip not defined:
-                return IOVM1_ERROR_MEMORY_CHIP_UNDEFINED;
-        }
-
-        FPGA_SELECT();
-        FPGA_TX_BYTE(FPGA_CMD_SETADDR | FPGA_TGT_MEM);
-        FPGA_TX_BYTE((addr >> 16) & 0xff);
-        FPGA_TX_BYTE((addr >> 8) & 0xff);
-        FPGA_TX_BYTE((addr) & 0xff);
-        FPGA_DESELECT();
+static uint24_t snescmd_addr_from_chip(enum iovm1_memory_chip c, uint24_t a, int l, uint24_t *addr) {
+    // special case for 2C00 EXE buffer:
+    if (a >= 0x200) {
+        return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+    }
+    if (a + l > 0x200) {
+        return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
     }
 
-    server_info.c = c;
-    server_info.a = a;
+    *addr = 0x2C00 + a;
+
     return IOVM1_SUCCESS;
 }
 
-// validate the addresses of a write operation with the given length
-enum iovm1_error host_memory_start_write(struct iovm1_t *vm, iovm1_memory_chip_t c, uint24_t a, int l) {
-    (void)vm;
-
-    if (c == MEM_SNES_2C00) {
-        // special case for 2C00 EXE buffer:
-        if (a >= 0x200) {
-            return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-        }
-        if (a + l > 0x200) {
-            return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-        }
-
-        uint16_t addr = 0x2C00 + a;
-
-        FPGA_SELECT();
-        FPGA_TX_BYTE(FPGA_CMD_SNESCMD_SETADDR);
-        FPGA_TX_BYTE(addr & 0xff);
-        FPGA_TX_BYTE(addr >> 8);
-        FPGA_DESELECT();
-    } else {
-        uint24_t addr;
-
-        switch (c) {
-            case MEM_SNES_WRAM: // WRAM:
-            case MEM_SNES_VRAM: // VRAM:
-            case MEM_SNES_CGRAM: // CGRAM:
-            case MEM_SNES_OAM: // OAM:
-            case MEM_SNES_ARAM: // APURAM:
-                return IOVM1_ERROR_MEMORY_CHIP_NOT_WRITABLE;
-            case MEM_SNES_ROM: // ROM:
-                if (a >= 0xE00000) {
-                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-                }
-                if (a + l > 0xE00000) {
-                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-                }
-                addr = 0x000000 + a;
-                break;
-            case MEM_SNES_SRAM: // SRAM:
-                if (a >= 0x150000) {
-                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-                }
-                if (a + l > 0x150000) {
-                    return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
-                }
-                addr = 0xE00000 + a;
-                break;
-            default: // memory chip not defined:
-                return IOVM1_ERROR_MEMORY_CHIP_UNDEFINED;
-        }
-
-        FPGA_SELECT();
-        FPGA_TX_BYTE(FPGA_CMD_SETADDR | FPGA_TGT_MEM);
-        FPGA_TX_BYTE((addr >> 16) & 0xff);
-        FPGA_TX_BYTE((addr >> 8) & 0xff);
-        FPGA_TX_BYTE((addr) & 0xff);
-        FPGA_DESELECT();
+static uint24_t sram_addr_from_chip(enum iovm1_memory_chip c, uint24_t a, int l, uint24_t *addr) {
+    switch (c) {
+        case MEM_SNES_WRAM: // WRAM:
+            if (a >= 0x20000) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            if (a + l > 0x20000) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            *addr = 0xF50000 + a;
+            break;
+        case MEM_SNES_VRAM: // VRAM:
+            if (a >= 0x10000) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            if (a + l > 0x10000) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            *addr = 0xF70000 + a;
+            break;
+        case MEM_SNES_CGRAM: // CGRAM:
+            if (a >= 0x200) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            if (a + l > 0x200) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            *addr = 0xF90000 + a;
+            break;
+        case MEM_SNES_OAM: // OAM:
+            if (a >= 0x220) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            if (a + l > 0x220) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            *addr = 0xF90200 + a;
+            break;
+        case MEM_SNES_ARAM: // APURAM:
+            if (a >= 0x10000) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            if (a + l > 0x10000) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            *addr = 0xF80000 + a;
+            break;
+        case MEM_SNES_ROM: // ROM:
+            if (a >= 0xE00000) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            if (a + l > 0xE00000) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            *addr = 0x000000 + a;
+            break;
+        case MEM_SNES_SRAM: // SRAM:
+            if (a >= 0x150000) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            if (a + l > 0x150000) {
+                return IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE;
+            }
+            *addr = 0xE00000 + a;
+            break;
+        default: // memory chip not defined:
+            return IOVM1_ERROR_MEMORY_CHIP_UNDEFINED;
     }
 
-    server_info.c = c;
-    server_info.a = a;
     return IOVM1_SUCCESS;
 }
 
-// read a byte and advance the chip address forward by 1 byte
-uint8_t host_memory_read_auto_advance(struct iovm1_t *vm) {
-    (void)vm;
-
-    if (server_info.c == MEM_SNES_2C00) {
-        uint8_t data;
-        FPGA_SELECT();
-        FPGA_TX_BYTE(FPGA_CMD_SNESCMD_READ);
-        data = FPGA_RX_BYTE();
-        FPGA_DESELECT();
-        return data;
-    } else {
-        uint8_t data;
-        FPGA_SELECT();
-        FPGA_TX_BYTE(FPGA_CMD_READMEM | FPGA_MEM_AUTOINC);
-        FPGA_WAIT_RDY();
-        data = FPGA_RX_BYTE();
-        FPGA_DESELECT();
-        return data;
+static bool memory_chip_is_writable(enum iovm1_memory_chip c, uint24_t a) {
+    switch (c) {
+        case MEM_SNES_WRAM: // WRAM:
+        case MEM_SNES_VRAM: // VRAM:
+        case MEM_SNES_CGRAM: // CGRAM:
+        case MEM_SNES_OAM: // OAM:
+        case MEM_SNES_ARAM: // APURAM:
+            return IOVM1_ERROR_MEMORY_CHIP_NOT_WRITABLE;
+        case MEM_SNES_2C00:
+        case MEM_SNES_ROM: // ROM:
+        case MEM_SNES_SRAM: // SRAM:
+            return IOVM1_SUCCESS;
+        default: // memory chip not defined:
+            return IOVM1_ERROR_MEMORY_CHIP_UNDEFINED;
     }
-}
-
-// read a byte and do not advance the chip address; useful for continuously polling a specific address
-uint8_t host_memory_read_no_advance(struct iovm1_t *vm) {
-    (void)vm;
-
-    if (server_info.c == MEM_SNES_2C00) {
-        uint8_t data;
-        FPGA_SELECT();
-        FPGA_TX_BYTE(FPGA_CMD_SNESCMD_RD_NOAD);
-        data = FPGA_RX_BYTE();
-        FPGA_DESELECT();
-        return data;
-    } else {
-        uint8_t data;
-        FPGA_SELECT();
-        FPGA_TX_BYTE(FPGA_CMD_READMEM);
-        FPGA_WAIT_RDY();
-        data = FPGA_RX_BYTE();
-        FPGA_DESELECT();
-        return data;
-    }
-}
-
-// write a byte and advance the chip address forward by 1 byte
-void host_memory_write_auto_advance(struct iovm1_t *vm, uint8_t b) {
-    (void)vm;
-
-    if (server_info.c == MEM_SNES_2C00) {
-        FPGA_SELECT();
-        FPGA_TX_BYTE(FPGA_CMD_SNESCMD_WRITE);
-        FPGA_TX_BYTE(b);
-        FPGA_TX_BYTE(0x00);
-        FPGA_DESELECT();
-    } else {
-        FPGA_SELECT();
-        FPGA_TX_BYTE(FPGA_CMD_WRITEMEM | FPGA_MEM_AUTOINC);
-        FPGA_TX_BYTE(b);
-        FPGA_WAIT_RDY();
-        FPGA_DESELECT();
-    }
-}
-
-// initialize a host-side countdown timer to a timeout value for WAIT operation, e.g. duration of a single video frame
-void host_timer_reset(struct iovm1_t *vm) {
-    (void)vm;
-    deadline_us(16667);
-}
-
-// checks if the host-side countdown timer has elapsed down to or below 0
-bool host_timer_elapsed(struct iovm1_t *vm) {
-    (void)vm;
-    return !deadline_in_future();
-}
-
-// stops the host-side countdown timer and releases any resources
-void host_timer_cleanup(struct iovm1_t *vm) {
-    (void)vm;
-    deadline_clean_up();
 }
 
 static void send_byte(uint8_t b) {
@@ -1087,27 +940,182 @@ static void send_byte(uint8_t b) {
     }
 }
 
+// advance memory-read state machine, use `vm->rd` for tracking state
+enum iovm1_error host_memory_read_state_machine(struct iovm1_t *vm) {
+    enum iovm1_error err;
+    uint24_t addr;
+
+    if (vm->rd.c == MEM_SNES_2C00) {
+        err = snescmd_addr_from_chip(vm->rd.c, vm->rd.a, vm->rd.l, &addr);
+        if (err != IOVM1_SUCCESS) {
+            return err;
+        }
+
+        // start read-data message:
+        send_byte(0xFE);
+        send_byte(vm->rd.l_raw);
+
+        fpga_set_snescmd_addr(addr);
+        while (vm->rd.l-- > 0) {
+            send_byte(fpga_read_snescmd());
+        }
+    } else {
+        err = sram_addr_from_chip(vm->rd.c, vm->rd.a, vm->rd.l, &addr);
+        if (err != IOVM1_SUCCESS) {
+            return err;
+        }
+
+        // start read-data message:
+        send_byte(0xFE);
+        send_byte(vm->rd.l_raw);
+
+        set_mcu_addr(addr);
+        FPGA_SELECT();
+        FPGA_TX_BYTE(0x88);   /* READ */
+        while (vm->rd.l-- > 0) {
+            uint8_t tmp;
+
+            FPGA_WAIT_RDY();
+            tmp = FPGA_RX_BYTE();
+
+            send_byte(tmp);
+        }
+        FPGA_DESELECT();
+    }
+
+    vm->rd.os = IOVM1_OPSTATE_COMPLETED;
+    return IOVM1_SUCCESS;
+}
+
+// advance memory-write state machine, use `vm->wr` for tracking state
+enum iovm1_error host_memory_write_state_machine(struct iovm1_t *vm) {
+    enum iovm1_error err;
+    uint24_t addr;
+
+    err = memory_chip_is_writable(vm->wr.c, vm->wr.a);
+    if (err != IOVM1_SUCCESS) {
+        return err;
+    }
+
+    if (vm->wr.c == MEM_SNES_2C00) {
+        err = snescmd_addr_from_chip(vm->wr.c, vm->wr.a, vm->wr.l, &addr);
+        if (err != IOVM1_SUCCESS) {
+            return err;
+        }
+
+        fpga_set_snescmd_addr(addr);
+        while (vm->wr.l-- > 0) {
+            fpga_write_snescmd(vm->m.ptr[vm->wr.p++]);
+        }
+    } else {
+        err = sram_addr_from_chip(vm->wr.c, vm->wr.a, vm->wr.l, &addr);
+        if (err != IOVM1_SUCCESS) {
+            return err;
+        }
+
+        set_mcu_addr(addr);
+        FPGA_SELECT();
+        FPGA_TX_BYTE(0x98);   /* WRITE */
+        while (vm->wr.l-- > 0) {
+            FPGA_TX_BYTE(vm->m.ptr[vm->wr.p++]);
+            FPGA_WAIT_RDY();
+        }
+        FPGA_DESELECT();
+    }
+
+    vm->wr.os = IOVM1_OPSTATE_COMPLETED;
+    return IOVM1_SUCCESS;
+}
+
+// advance memory-wait state machine, use `vm->wa` for tracking state, use `iovm1_memory_wait_test_byte` for comparison func
+enum iovm1_error host_memory_wait_state_machine(struct iovm1_t *vm) {
+    enum iovm1_error err;
+    uint24_t addr;
+
+    // initialize 16.666ms deadline timer:
+    deadline_us(16666);
+
+    if (vm->wa.c == MEM_SNES_2C00) {
+        err = snescmd_addr_from_chip(vm->wa.c, vm->wa.a, 1, &addr);
+        if (err != IOVM1_SUCCESS) {
+            // clean up deadline timer:
+            deadline_clean_up();
+            return err;
+        }
+
+        while (deadline_in_future()) {
+            uint8_t tmp;
+
+            fpga_set_snescmd_addr(addr);
+            tmp = fpga_read_snescmd();
+
+            if (iovm1_memory_wait_test_byte(vm, tmp)) {
+                // clean up deadline timer:
+                deadline_clean_up();
+
+                vm->wa.os = IOVM1_OPSTATE_COMPLETED;
+                return IOVM1_SUCCESS;
+            }
+        }
+    } else {
+        err = sram_addr_from_chip(vm->wa.c, vm->wa.a, 1, &addr);
+        if (err != IOVM1_SUCCESS) {
+            // clean up deadline timer:
+            deadline_clean_up();
+            return err;
+        }
+
+        while (deadline_in_future()) {
+            uint8_t tmp;
+
+            tmp = sram_readbyte(addr);
+
+            if (iovm1_memory_wait_test_byte(vm, tmp)) {
+                // clean up deadline timer:
+                deadline_clean_up();
+
+                vm->wa.os = IOVM1_OPSTATE_COMPLETED;
+                return IOVM1_SUCCESS;
+            }
+        }
+    }
+
+    // clean up deadline timer:
+    deadline_clean_up();
+    return IOVM1_ERROR_TIMED_OUT;
+}
+
+// try to read a byte from a memory chip, return byte in `*b` if successful
+enum iovm1_error host_memory_try_read_byte(struct iovm1_t *vm, iovm1_memory_chip_t c, uint24_t a, uint8_t *b) {
+    if (c == MEM_SNES_2C00) {
+        // special case for 2C00 EXE buffer:
+        uint24_t addr;
+        enum iovm1_error err = snescmd_addr_from_chip(c, a, 1, &addr);
+        if (err != IOVM1_SUCCESS) {
+            return err;
+        }
+
+        fpga_set_snescmd_addr(addr);
+        *b = fpga_read_snescmd();
+
+        return IOVM1_SUCCESS;
+    } else {
+        uint24_t addr;
+        enum iovm1_error err = sram_addr_from_chip(c, a, 1, &addr);
+        if (err != IOVM1_SUCCESS) {
+            return err;
+        }
+
+        *b = sram_readbyte(addr);
+
+        return IOVM1_SUCCESS;
+    }
+}
+
 // send a program-end message to the client
 void host_send_end(struct iovm1_t *vm) {
     send_byte(0xFF);
     send_byte(vm->e);
-}
-// send an abort message to the client
-void host_send_abort(struct iovm1_t *vm) {
-    send_byte(0xFF);
-    send_byte(vm->e);
-}
-// send a read-complete message to the client with the fully read data up to 256 bytes in length
-void host_send_read(struct iovm1_t *vm, uint8_t l, uint8_t *d) {
-    (void)vm;
-    send_byte(0xFE);
-    send_byte(l);
-
-    int len = l;
-    if (len == 0) { len = 256; }
-    while (len-- > 0) {
-        send_byte(*d++);
-    }
 }
 
 int usbint_handler_dat(void) {
