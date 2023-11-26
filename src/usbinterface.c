@@ -945,6 +945,13 @@ enum iovm1_error host_memory_read_state_machine(struct iovm1_t *vm) {
     enum iovm1_error err;
     uint24_t addr;
 
+    // NOTE: we buffer the read data into memory first so that we don't have to wait for a split USB packet to go out
+    // which may compromise the user's timing requirements of the read operation.
+
+    // buffer for data to read into:
+    uint8_t rdbuf[256 + 6];
+    uint8_t *d = rdbuf;
+
     if (vm->rd.c == MEM_SNES_2C00) {
         err = snescmd_addr_from_chip(vm->rd.c, vm->rd.a, vm->rd.l, &addr);
         if (err != IOVM1_SUCCESS) {
@@ -952,12 +959,19 @@ enum iovm1_error host_memory_read_state_machine(struct iovm1_t *vm) {
         }
 
         // start read-data message:
-        send_byte(0xFE);
-        send_byte(vm->rd.l_raw);
+        *d++ = 0xFE;
+        // memory chip:
+        *d++ = (vm->rd.c);
+        // 24-bit address:
+        *d++ = (vm->rd.a & 0xFF);
+        *d++ = ((vm->rd.a >> 8) & 0xFF);
+        *d++ = ((vm->rd.a >> 16) & 0xFF);
+        // length of read (1..255 bytes, and 0 encodes 256 bytes):
+        *d++ = (vm->rd.l_raw);
 
         fpga_set_snescmd_addr(addr);
         while (vm->rd.l-- > 0) {
-            send_byte(fpga_read_snescmd());
+            *d++ = (fpga_read_snescmd());
         }
     } else {
         err = sram_addr_from_chip(vm->rd.c, vm->rd.a, vm->rd.l, &addr);
@@ -966,21 +980,29 @@ enum iovm1_error host_memory_read_state_machine(struct iovm1_t *vm) {
         }
 
         // start read-data message:
-        send_byte(0xFE);
-        send_byte(vm->rd.l_raw);
+        *d++ = (0xFE);
+        // memory chip:
+        *d++ = (vm->rd.c);
+        // 24-bit address:
+        *d++ = (vm->rd.a & 0xFF);
+        *d++ = ((vm->rd.a >> 8) & 0xFF);
+        *d++ = ((vm->rd.a >> 16) & 0xFF);
+        // length of read (1..255 bytes, and 0 encodes 256 bytes):
+        *d++ = (vm->rd.l_raw);
 
         set_mcu_addr(addr);
         FPGA_SELECT();
         FPGA_TX_BYTE(0x88);   /* READ */
         while (vm->rd.l-- > 0) {
-            uint8_t tmp;
-
             FPGA_WAIT_RDY();
-            tmp = FPGA_RX_BYTE();
-
-            send_byte(tmp);
+            *d++ = FPGA_RX_BYTE();
         }
         FPGA_DESELECT();
+    }
+
+    // send out buffered read data:
+    for (uint8_t *s = rdbuf; s < d; s++) {
+        send_byte(*s);
     }
 
     vm->rd.os = IOVM1_OPSTATE_COMPLETED;
@@ -1003,9 +1025,20 @@ enum iovm1_error host_memory_write_state_machine(struct iovm1_t *vm) {
             return err;
         }
 
-        fpga_set_snescmd_addr(addr);
-        while (vm->wr.l-- > 0) {
-            fpga_write_snescmd(vm->m.ptr[vm->wr.p++]);
+        if (addr == 0x2C00 && vm->wr.l > 1) {
+            // write $2C01.. first:
+            fpga_set_snescmd_addr(addr+1);
+            for (int l = 1; l < vm->wr.l; l++) {
+                fpga_write_snescmd(vm->m.ptr[vm->wr.p + l]);
+            }
+            // write $2C00 byte last to enable nmi exe override:
+            fpga_set_snescmd_addr(addr);
+            fpga_write_snescmd(vm->m.ptr[vm->wr.p]);
+        } else {
+            fpga_set_snescmd_addr(addr);
+            while (vm->wr.l-- > 0) {
+                fpga_write_snescmd(vm->m.ptr[vm->wr.p++]);
+            }
         }
     } else {
         err = sram_addr_from_chip(vm->wr.c, vm->wr.a, vm->wr.l, &addr);
@@ -1114,8 +1147,13 @@ enum iovm1_error host_memory_try_read_byte(struct iovm1_t *vm, iovm1_memory_chip
 
 // send a program-end message to the client
 void host_send_end(struct iovm1_t *vm) {
+    // end program message:
     send_byte(0xFF);
+    // error code:
     send_byte(vm->e);
+    // offset within program of where we ended:
+    send_byte(vm->p & 0xFF);
+    send_byte((vm->p >> 8) & 0xFF);
 }
 
 int usbint_handler_dat(void) {
