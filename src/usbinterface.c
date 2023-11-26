@@ -185,7 +185,7 @@ struct usbint_server_info_t {
 
   uint8_t c;    // memory chip
   uint24_t a;   // linear address within memory chip
-  int *vm_bytes_sent;
+  int vm_bytes_sent;
 
   uint8_t data_ready;
   int error;
@@ -1078,12 +1078,12 @@ void host_timer_cleanup(struct iovm1_t *vm) {
 }
 
 static void send_byte(uint8_t b) {
-    send_buffer[send_buffer_index][(*server_info.vm_bytes_sent)++] = b;
+    send_buffer[send_buffer_index][server_info.vm_bytes_sent++] = b;
 
-    if (*server_info.vm_bytes_sent >= server_info.block_size) {
+    if (server_info.vm_bytes_sent >= server_info.block_size) {
         // flush buffer to USB:
         usbint_send_block(server_info.block_size);
-        *server_info.vm_bytes_sent = 0;
+        server_info.vm_bytes_sent = 0;
     }
 }
 
@@ -1129,11 +1129,8 @@ int usbint_handler_dat(void) {
         reentrant = -1;
 
         // keep the USBA header and error/flags:
-        bytesSent = 6;
+        server_info.vm_bytes_sent = 6;
         if (!server_info.error) {
-            // number of bytes filled in the send_buffer:
-            server_info.vm_bytes_sent = &bytesSent;
-
             do {
                 // move the state machine forward one instruction or read/write/wait loop iteration:
                 server_info.error = iovm1_exec(&vm);
@@ -1150,9 +1147,9 @@ int usbint_handler_dat(void) {
         // finish command:
         server_info.data_ready = 0;
         server_state = USBINT_SERVER_STATE_IDLE;
-        if (bytesSent > 0) {
+        if (server_info.vm_bytes_sent > 0) {
             // clear out any remaining portion of the buffer
-            memset((unsigned char *)send_buffer[send_buffer_index] + bytesSent, 0x00, server_info.block_size - bytesSent);
+            memset((unsigned char *)send_buffer[send_buffer_index] + server_info.vm_bytes_sent, 0x00, server_info.block_size - server_info.vm_bytes_sent);
             // send the final block:
             usbint_send_block(server_info.block_size);
         }
