@@ -1119,7 +1119,7 @@ enum iovm1_error host_memory_wait_state_machine(struct iovm1_t *vm) {
 }
 
 // try to read a byte from a memory chip, return byte in `*b` if successful
-enum iovm1_error host_memory_try_read_byte(struct iovm1_t *vm, iovm1_memory_chip_t c, uint24_t a, uint8_t *b) {
+enum iovm1_error host_memory_try_read_byte(struct iovm1_t *vm, enum iovm1_memory_chip c, uint24_t a, uint8_t *b) {
     if (c == MEM_SNES_2C00) {
         // special case for 2C00 EXE buffer:
         uint24_t addr;
