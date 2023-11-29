@@ -26,6 +26,8 @@
 
 #include <string.h>
 #include <libgen.h>
+#include <stdint.h>
+#include <stdbool.h>
 #include "bits.h"
 #include "config.h"
 #include "version.h"
@@ -47,7 +49,6 @@
 #include "cfg.h"
 #include "cdcuser.h"
 #include "cheat.h"
-#include "iovm.h"
 
 static inline void __DMB2(void) { asm volatile ("dmb" ::: "memory"); }
 
@@ -165,6 +166,88 @@ volatile enum usbint_server_stream_state_e stream_state;
 static int reset_state = 0;
 volatile static int cmdDat = 0;
 volatile static unsigned connected = 0;
+
+typedef uint32_t uint24_t;
+
+enum iovm1_opcode {
+    IOVM1_OPCODE_READ,
+    IOVM1_OPCODE_WRITE,
+    IOVM1_OPCODE_WAIT_UNTIL,
+    IOVM1_OPCODE_ABORT_IF
+};
+
+enum iovm1_cmp_operator {
+    IOVM1_CMP_EQ,
+    IOVM1_CMP_NEQ,
+    IOVM1_CMP_LT,
+    IOVM1_CMP_NLT,
+    IOVM1_CMP_GT,
+    IOVM1_CMP_NGT
+};
+
+#define IOVM1_INST_OPCODE(x)        ((enum iovm1_opcode) ((x)&3))
+#define IOVM1_INST_CMP_OPERATOR(x)  ((enum iovm1_cmp_operator) (((x)>>2)&7))
+
+enum iovm1_memory_chip {
+    MEM_SNES_WRAM,
+    MEM_SNES_VRAM,
+    MEM_SNES_CGRAM,
+    MEM_SNES_OAM,
+    MEM_SNES_ARAM,
+    MEM_SNES_2C00,
+    MEM_SNES_ROM,
+    MEM_SNES_SRAM,
+};
+
+enum iovm1_state {
+    IOVM1_STATE_EXECUTE_NEXT,
+    IOVM1_STATE_ENDED,
+    IOVM1_STATE_ERRORED,
+};
+
+enum iovm1_error {
+    IOVM1_SUCCESS,
+    IOVM1_ERROR_OUT_OF_RANGE,
+    IOVM1_ERROR_INVALID_OPERATION_FOR_STATE,
+    IOVM1_ERROR_UNKNOWN_OPCODE,
+    IOVM1_ERROR_TIMED_OUT,
+    IOVM1_ERROR_ABORTED,
+    IOVM1_ERROR_MEMORY_CHIP_UNDEFINED,
+    IOVM1_ERROR_MEMORY_CHIP_ADDRESS_OUT_OF_RANGE,
+    IOVM1_ERROR_MEMORY_CHIP_NOT_READABLE,
+    IOVM1_ERROR_MEMORY_CHIP_NOT_WRITABLE,
+};
+
+static inline bool iovm1_memory_cmp(enum iovm1_cmp_operator q, uint8_t a, uint8_t b) {
+    switch (q) {
+        case IOVM1_CMP_EQ: return a == b;
+        case IOVM1_CMP_NEQ: return a != b;
+        case IOVM1_CMP_LT: return a < b;
+        case IOVM1_CMP_NLT: return a >= b;
+        case IOVM1_CMP_GT: return a > b;
+        case IOVM1_CMP_NGT: return a <= b;
+        default: return false;
+    }
+}
+
+struct iovm1_t {
+    // linear memory containing procedure instructions and immediate data
+    struct {
+        const uint8_t *ptr;
+        uint32_t len;
+        uint32_t off;
+    } m;
+
+    // current state
+    enum iovm1_state s;
+    enum iovm1_error e;
+
+    // offset of current executing opcode:
+    uint32_t p;
+
+    // offset of next opcode:
+    uint32_t pn;
+};
 
 struct iovm1_t vm;
 uint8_t vm_procedure[512-8];
@@ -548,19 +631,13 @@ int usbint_handler_cmd(void) {
         memcpy(vm_procedure, (const uint8_t *) cmd_buffer + 8, len);
 
         // initialize vm:
-        iovm1_init(&vm);
-
-        // point vm at procedure:
-        server_info.error = iovm1_load(&vm, vm_procedure, len);
-        if (server_info.error) {
-            break;
-        }
-
-        // reset vm to begin execution:
-        server_info.error = iovm1_exec_reset(&vm);
-        if (server_info.error) {
-            break;
-        }
+        vm.m.ptr = vm_procedure;
+        vm.m.len = len;
+        vm.m.off = 0;
+        vm.pn = 0;
+        vm.p = 0;
+        vm.e = IOVM1_SUCCESS;
+        vm.s = IOVM1_STATE_EXECUTE_NEXT;
 
         // don't know how much data up-front will be returned, so just use 1:
         server_info.size = 1;
@@ -911,7 +988,7 @@ static uint24_t sram_addr_from_chip(enum iovm1_memory_chip c, uint24_t a, int l,
     return IOVM1_SUCCESS;
 }
 
-static bool memory_chip_is_writable(enum iovm1_memory_chip c, uint24_t a) {
+static enum iovm1_error memory_chip_is_writable(enum iovm1_memory_chip c, uint24_t a) {
     switch (c) {
         case MEM_SNES_WRAM: // WRAM:
         case MEM_SNES_VRAM: // VRAM:
@@ -928,7 +1005,7 @@ static bool memory_chip_is_writable(enum iovm1_memory_chip c, uint24_t a) {
     }
 }
 
-static void send_byte(uint8_t b) {
+static void send_msg_byte(uint8_t b) {
     send_buffer[send_buffer_index][server_info.vm_bytes_sent++] = b;
 
     if (server_info.vm_bytes_sent >= server_info.block_size) {
@@ -938,220 +1015,462 @@ static void send_byte(uint8_t b) {
     }
 }
 
-// advance memory-read state machine, use `vm->rd` for tracking state
-enum iovm1_error host_memory_read_state_machine(struct iovm1_t *vm) {
-    enum iovm1_error err;
-    uint24_t addr;
+// send a program-end message to the client
+static void send_end_msg(void) {
+    // end program message:
+    send_msg_byte(0xFF);
+    // error code:
+    send_msg_byte(vm.e);
+    // offset within program of where we ended:
+    send_msg_byte(vm.p & 0xFF);
+    send_msg_byte((vm.p >> 8) & 0xFF);
+}
 
-    // NOTE: we buffer the read data into memory first so that we don't have to wait for a split USB packet to go out
-    // which may compromise the user's timing requirements of the read operation.
+// executes the next IOVM instruction
+static inline enum iovm1_error iovm1_exec(void) {
+    /*
+IOVM1 instruction byte format:
+
+   765432 10
+  [?????? oo]
+
+    o = opcode              [0..3]
+    ? = varies by opcode
+
+opcodes (o):
+-----------------------
+  0=READ:               reads bytes from memory chip
+     765432 10
+    [------ 00]
+
+        enum iovm1_memory_chip c;
+        uint24_t a;
+        uint8_t l_raw;
+        int l;
+
+        // memory chip identifier (0..255)
+        c  = m[p++];
+        // memory address in 24-bit little-endian byte order:
+        a  = m[p++];
+        a |= m[p++] << 8;
+        a |= m[p++] << 16;
+        // length of read in bytes (treat 0 as 256, else 1..255)
+        l_raw = m[p++];
+        l = translate_zero_byte(vm->rd.l_raw);
+
+-----------------------
+  1=WRITE:              writes bytes to memory chip
+     765432 10
+    [------ 01]
+
+        enum iovm1_memory_chip c;
+        uint24_t a;
+        uint8_t l_raw;
+        int l;
+
+        // memory chip identifier (0..255)
+        c  = m[p++]
+        // memory address in 24-bit little-endian byte order:
+        a  = m[p++]
+        a |= m[p++] << 8
+        a |= m[p++] << 16
+        // length of write in bytes (treat 0 as 256, else 1..255)
+        l_raw = m[p++]
+        l  = translate_zero_byte(l_raw)
+
+-----------------------
+  2=WAIT_UNTIL:         waits until a byte read from a memory chip compares to a value -- for read/write timing purposes
+     765 432 10
+    [--- qqq 10]
+        q = comparison operator [0..7]
+            0 =        EQ; equals
+            1 =       NEQ; not equals
+            2 =        LT; less than
+            3 =       NLT; not less than
+            4 =        GT; greater than
+            5 =       NGT; not greater than
+            6 = undefined; returns false
+            7 = undefined; returns false
+
+        enum iovm1_memory_chip c;
+        uint24_t a;
+        uint8_t v;
+        uint8_t k;
+
+        // memory chip identifier (0..255)
+        c  = m[p++]
+        // memory address in 24-bit little-endian byte order:
+        a  = m[p++]
+        a |= m[p++] << 8
+        a |= m[p++] << 16
+        // comparison byte
+        v  = m[p++]
+        // comparison mask
+        k  = m[p++]
+
+-----------------------
+  3=ABORT_IF:           reads a byte from a memory chip and compares to a value; if true, aborts program execution
+     765 432 10
+    [--- qqq 11]
+        q = comparison operator [0..7]
+            0 =        EQ; equals
+            1 =       NEQ; not equals
+            2 =        LT; less than
+            3 =       NLT; not less than
+            4 =        GT; greater than
+            5 =       NGT; not greater than
+            6 = undefined; returns false
+            7 = undefined; returns false
+
+        enum iovm1_memory_chip c;
+        uint24_t a;
+        uint8_t v;
+        uint8_t k;
+
+        // memory chip identifier (0..255)
+        c  = m[p++]
+        // memory address in 24-bit little-endian byte order:
+        a  = m[p++]
+        a |= m[p++] << 8
+        a |= m[p++] << 16
+        // comparison byte
+        v  = m[p++]
+        // comparison mask
+        k  = m[p++]
+    */
 
     // buffer for data to read into:
-    uint8_t rdbuf[256 + 6];
-    uint8_t *d = rdbuf;
-
-    if (vm->rd.c == MEM_SNES_2C00) {
-        err = snescmd_addr_from_chip(vm->rd.c, vm->rd.a, vm->rd.l, &addr);
-        if (err != IOVM1_SUCCESS) {
-            return err;
-        }
-
-        // start read-data message:
-        *d++ = 0xFE;
-        // memory chip:
-        *d++ = (vm->rd.c);
-        // 24-bit address:
-        *d++ = (vm->rd.a & 0xFF);
-        *d++ = ((vm->rd.a >> 8) & 0xFF);
-        *d++ = ((vm->rd.a >> 16) & 0xFF);
-        // length of read (1..255 bytes, and 0 encodes 256 bytes):
-        *d++ = (vm->rd.l_raw);
-
-        fpga_set_snescmd_addr(addr);
-        while (vm->rd.l-- > 0) {
-            *d++ = (fpga_read_snescmd());
-        }
-    } else {
-        err = sram_addr_from_chip(vm->rd.c, vm->rd.a, vm->rd.l, &addr);
-        if (err != IOVM1_SUCCESS) {
-            return err;
-        }
-
-        // start read-data message:
-        *d++ = (0xFE);
-        // memory chip:
-        *d++ = (vm->rd.c);
-        // 24-bit address:
-        *d++ = (vm->rd.a & 0xFF);
-        *d++ = ((vm->rd.a >> 8) & 0xFF);
-        *d++ = ((vm->rd.a >> 16) & 0xFF);
-        // length of read (1..255 bytes, and 0 encodes 256 bytes):
-        *d++ = (vm->rd.l_raw);
-
-        set_mcu_addr(addr);
-        FPGA_SELECT();
-        FPGA_TX_BYTE(0x88);   /* READ */
-        while (vm->rd.l-- > 0) {
-            FPGA_WAIT_RDY();
-            *d++ = FPGA_RX_BYTE();
-        }
-        FPGA_DESELECT();
-    }
-
-    // send out buffered read data:
-    for (uint8_t *s = rdbuf; s < d; s++) {
-        send_byte(*s);
-    }
-
-    vm->rd.os = IOVM1_OPSTATE_COMPLETED;
-    return IOVM1_SUCCESS;
-}
-
-// advance memory-write state machine, use `vm->wr` for tracking state
-enum iovm1_error host_memory_write_state_machine(struct iovm1_t *vm) {
-    enum iovm1_error err;
+    uint8_t rdbuf[256 + 6], *d;
     uint24_t addr;
 
-    err = memory_chip_is_writable(vm->wr.c, vm->wr.a);
-    if (err != IOVM1_SUCCESS) {
-        return err;
+    // first check here to handle read/write/wait instructions -- for lower latency between loop iterations:
+    if (vm.s == IOVM1_STATE_ERRORED) {
+        // maintain errored state until explicit reset:
+        return vm.e;
     }
 
-    if (vm->wr.c == MEM_SNES_2C00) {
-        err = snescmd_addr_from_chip(vm->wr.c, vm->wr.a, vm->wr.l, &addr);
-        if (err != IOVM1_SUCCESS) {
-            return err;
+    while (vm.s == IOVM1_STATE_EXECUTE_NEXT) {
+        vm.m.off = vm.pn;
+        vm.p = vm.m.off;
+
+        if (vm.m.off >= vm.m.len) {
+            vm.s = IOVM1_STATE_ENDED;
+            vm.e = IOVM1_SUCCESS;
+            send_end_msg();
+            return vm.e;
         }
 
-        if (addr == 0x2C00 && vm->wr.l > 1) {
-            // write $2C01.. first:
-            fpga_set_snescmd_addr(addr+1);
-            for (int l = 1; l < vm->wr.l; l++) {
-                fpga_write_snescmd(vm->m.ptr[vm->wr.p + l]);
+        // read instruction byte:
+        uint8_t x = vm.m.ptr[vm.m.off++];
+
+        // instruction opcode:
+        uint8_t o = IOVM1_INST_OPCODE(x);
+        switch (o) {
+            case IOVM1_OPCODE_READ: {
+                vm.pn = vm.m.off + 5;
+
+                // memory chip identifier:
+                uint8_t c = (enum iovm1_memory_chip)vm.m.ptr[vm.m.off++];
+                // 24-bit address:
+                uint24_t lo = (uint24_t)(vm.m.ptr[vm.m.off++]);
+                uint24_t hi = (uint24_t)(vm.m.ptr[vm.m.off++]) << 8;
+                uint24_t bk = (uint24_t)(vm.m.ptr[vm.m.off++]) << 16;
+                uint24_t a = bk | hi | lo;
+                // length of read in bytes:
+                uint8_t l_raw = vm.m.ptr[vm.m.off++];
+                // translate 0 -> 256:
+                int l = l_raw;
+                if (l == 0) { l = 256; }
+
+                // NOTE: we buffer the read data into memory first so that we don't have to wait for a split USB packet to go out
+                // which may compromise the user's timing requirements of the read operation.
+
+                d = rdbuf;
+                if (c == MEM_SNES_2C00) {
+                    vm.e = snescmd_addr_from_chip(c, a, l, &addr);
+                    if (vm.e != IOVM1_SUCCESS) {
+                        vm.s = IOVM1_STATE_ERRORED;
+                        send_end_msg();
+                        return vm.e;
+                    }
+
+                    // start read-data message:
+                    *d++ = 0xFE;
+                    // memory chip:
+                    *d++ = (c);
+                    // 24-bit address:
+                    *d++ = (a & 0xFF);
+                    *d++ = ((a >> 8) & 0xFF);
+                    *d++ = ((a >> 16) & 0xFF);
+                    // length of read (1..255 bytes, and 0 encodes 256 bytes):
+                    *d++ = l_raw;
+
+                    fpga_set_snescmd_addr(addr);
+                    while (l-- > 0) {
+                        *d++ = fpga_read_snescmd();
+                    }
+                } else {
+                    vm.e = sram_addr_from_chip(c, a, l, &addr);
+                    if (vm.e != IOVM1_SUCCESS) {
+                        vm.s = IOVM1_STATE_ERRORED;
+                        send_end_msg();
+                        return vm.e;
+                    }
+
+                    // start read-data message:
+                    *d++ = (0xFE);
+                    // memory chip:
+                    *d++ = (c);
+                    // 24-bit address:
+                    *d++ = (a & 0xFF);
+                    *d++ = ((a >> 8) & 0xFF);
+                    *d++ = ((a >> 16) & 0xFF);
+                    // length of read (1..255 bytes, and 0 encodes 256 bytes):
+                    *d++ = l_raw;
+
+                    set_mcu_addr(addr);
+                    FPGA_SELECT();
+                    FPGA_TX_BYTE(0x88);   /* READ */
+                    while (l-- > 0) {
+                        FPGA_WAIT_RDY();
+                        *d++ = FPGA_RX_BYTE();
+                    }
+                    FPGA_DESELECT();
+                }
+
+                // send out buffered read data:
+                for (uint8_t *s = rdbuf; s < d; s++) {
+                    send_msg_byte(*s);
+                }
+
+                // start next instruction:
+                vm.e = IOVM1_SUCCESS;
+                return vm.e;
             }
-            // write $2C00 byte last to enable nmi exe override:
-            fpga_set_snescmd_addr(addr);
-            fpga_write_snescmd(vm->m.ptr[vm->wr.p]);
-        } else {
-            fpga_set_snescmd_addr(addr);
-            while (vm->wr.l-- > 0) {
-                fpga_write_snescmd(vm->m.ptr[vm->wr.p++]);
+            case IOVM1_OPCODE_WRITE: {
+                vm.pn = vm.m.off + 5;
+
+                // memory chip identifier:
+                uint8_t c = (enum iovm1_memory_chip)vm.m.ptr[vm.m.off++];
+                // 24-bit address:
+                uint24_t lo = (uint24_t)(vm.m.ptr[vm.m.off++]);
+                uint24_t hi = (uint24_t)(vm.m.ptr[vm.m.off++]) << 8;
+                uint24_t bk = (uint24_t)(vm.m.ptr[vm.m.off++]) << 16;
+                uint24_t a = bk | hi | lo;
+
+                // length of read in bytes:
+                uint8_t l_raw = vm.m.ptr[vm.m.off++];
+                // translate 0 -> 256:
+                int l = l_raw;
+                if (l == 0) { l = 256; }
+
+                vm.pn += l;
+
+                // perform entire write:
+                uint32_t p = vm.m.off;
+
+                vm.e = memory_chip_is_writable(c, a);
+                if (vm.e != IOVM1_SUCCESS) {
+                    vm.s = IOVM1_STATE_ERRORED;
+                    send_end_msg();
+                    return vm.e;
+                }
+
+                if (c == MEM_SNES_2C00) {
+                    vm.e = snescmd_addr_from_chip(c, a, l, &addr);
+                    if (vm.e != IOVM1_SUCCESS) {
+                        vm.s = IOVM1_STATE_ERRORED;
+                        send_end_msg();
+                        return vm.e;
+                    }
+
+                    if (addr == 0x2C00 && l > 1) {
+                        // write $2C01.. first:
+                        fpga_set_snescmd_addr(addr+1);
+                        for (int n = 1; n < l; n++) {
+                            fpga_write_snescmd(vm.m.ptr[p + n]);
+                        }
+
+                        // write $2C00 byte last to enable nmi exe override:
+                        fpga_set_snescmd_addr(addr);
+                        fpga_write_snescmd(vm.m.ptr[p]);
+                    } else {
+                        fpga_set_snescmd_addr(addr);
+                        while (l-- > 0) {
+                            fpga_write_snescmd(vm.m.ptr[p++]);
+                        }
+                    }
+                } else {
+                    vm.e = sram_addr_from_chip(c, a, l, &addr);
+                    if (vm.e != IOVM1_SUCCESS) {
+                        vm.s = IOVM1_STATE_ERRORED;
+                        send_end_msg();
+                        return vm.e;
+                    }
+
+                    set_mcu_addr(addr);
+                    FPGA_SELECT();
+                    FPGA_TX_BYTE(0x98);   /* WRITE */
+                    while (l-- > 0) {
+                        FPGA_TX_BYTE(vm.m.ptr[p++]);
+                        FPGA_WAIT_RDY();
+                    }
+                    FPGA_DESELECT();
+                }
+
+                // write complete; start next instruction:
+                vm.e = IOVM1_SUCCESS;
+                return vm.e;
             }
-        }
-    } else {
-        err = sram_addr_from_chip(vm->wr.c, vm->wr.a, vm->wr.l, &addr);
-        if (err != IOVM1_SUCCESS) {
-            return err;
-        }
+            case IOVM1_OPCODE_WAIT_UNTIL: {
+                vm.pn = vm.m.off + 6;
 
-        set_mcu_addr(addr);
-        FPGA_SELECT();
-        FPGA_TX_BYTE(0x98);   /* WRITE */
-        while (vm->wr.l-- > 0) {
-            FPGA_TX_BYTE(vm->m.ptr[vm->wr.p++]);
-            FPGA_WAIT_RDY();
-        }
-        FPGA_DESELECT();
-    }
+                enum iovm1_cmp_operator q = IOVM1_INST_CMP_OPERATOR(x);
 
-    vm->wr.os = IOVM1_OPSTATE_COMPLETED;
-    return IOVM1_SUCCESS;
-}
+                // memory chip identifier:
+                uint8_t c = (enum iovm1_memory_chip)vm.m.ptr[vm.m.off++];
+                // 24-bit address:
+                uint24_t lo = (uint24_t)(vm.m.ptr[vm.m.off++]);
+                uint24_t hi = (uint24_t)(vm.m.ptr[vm.m.off++]) << 8;
+                uint24_t bk = (uint24_t)(vm.m.ptr[vm.m.off++]) << 16;
+                uint24_t a = bk | hi | lo;
 
-// advance memory-wait state machine, use `vm->wa` for tracking state, use `iovm1_memory_wait_test_byte` for comparison func
-enum iovm1_error host_memory_wait_state_machine(struct iovm1_t *vm) {
-    enum iovm1_error err;
-    uint24_t addr;
+                // comparison byte
+                uint8_t v  = vm.m.ptr[vm.m.off++];
+                // comparison mask
+                uint8_t k  = vm.m.ptr[vm.m.off++];
 
-    // initialize 16.666ms deadline timer:
-    deadline_us(16666);
+                // perform loop to wait until (comparison byte & mask) successfully compares to value:
 
-    if (vm->wa.c == MEM_SNES_2C00) {
-        err = snescmd_addr_from_chip(vm->wa.c, vm->wa.a, 1, &addr);
-        if (err != IOVM1_SUCCESS) {
-            // clean up deadline timer:
-            deadline_clean_up();
-            return err;
-        }
+                // initialize 16.666ms deadline timer:
+                deadline_us(16666);
 
-        while (deadline_in_future()) {
-            uint8_t tmp;
+                if (c == MEM_SNES_2C00) {
+                    vm.e = snescmd_addr_from_chip(c, a, 1, &addr);
+                    if (vm.e != IOVM1_SUCCESS) {
+                        // clean up deadline timer:
+                        deadline_clean_up();
+                        vm.s = IOVM1_STATE_ERRORED;
+                        send_end_msg();
+                        return vm.e;
+                    }
 
-            fpga_set_snescmd_addr(addr);
-            tmp = fpga_read_snescmd();
+                    vm.e = IOVM1_ERROR_TIMED_OUT;
+                    while (deadline_in_future()) {
+                        uint8_t tmp;
 
-            if (iovm1_memory_wait_test_byte(vm, tmp)) {
+                        fpga_set_snescmd_addr(addr);
+                        tmp = fpga_read_snescmd();
+
+                        if (iovm1_memory_cmp(q, tmp & k, v)) {
+                            vm.e = IOVM1_SUCCESS;
+                            break;
+                        }
+                    }
+                } else {
+                    vm.e = sram_addr_from_chip(c, a, 1, &addr);
+                    if (vm.e != IOVM1_SUCCESS) {
+                        // clean up deadline timer:
+                        deadline_clean_up();
+                        vm.s = IOVM1_STATE_ERRORED;
+                        send_end_msg();
+                        return vm.e;
+                    }
+
+                    vm.e = IOVM1_ERROR_TIMED_OUT;
+                    while (deadline_in_future()) {
+                        uint8_t tmp;
+
+                        tmp = sram_readbyte(addr);
+
+                        if (iovm1_memory_cmp(q, tmp & k, v)) {
+                            vm.e = IOVM1_SUCCESS;
+                            break;
+                        }
+                    }
+                }
+
                 // clean up deadline timer:
                 deadline_clean_up();
 
-                vm->wa.os = IOVM1_OPSTATE_COMPLETED;
-                return IOVM1_SUCCESS;
+                if (vm.e != IOVM1_SUCCESS) {
+                    // wait timed out or error occurred:
+                    vm.s = IOVM1_STATE_ERRORED;
+                }
+
+                // wait complete; start next instruction:
+                return vm.e;
             }
-        }
-    } else {
-        err = sram_addr_from_chip(vm->wa.c, vm->wa.a, 1, &addr);
-        if (err != IOVM1_SUCCESS) {
-            // clean up deadline timer:
-            deadline_clean_up();
-            return err;
-        }
+            case IOVM1_OPCODE_ABORT_IF: {
+                vm.pn = vm.m.off + 6;
 
-        while (deadline_in_future()) {
-            uint8_t tmp;
+                enum iovm1_cmp_operator q = IOVM1_INST_CMP_OPERATOR(x);
 
-            tmp = sram_readbyte(addr);
+                // memory chip identifier:
+                enum iovm1_memory_chip c = (enum iovm1_memory_chip)vm.m.ptr[vm.m.off++];
+                // 24-bit address:
+                uint24_t lo = (uint24_t)(vm.m.ptr[vm.m.off++]);
+                uint24_t hi = (uint24_t)(vm.m.ptr[vm.m.off++]) << 8;
+                uint24_t bk = (uint24_t)(vm.m.ptr[vm.m.off++]) << 16;
+                uint24_t a = bk | hi | lo;
 
-            if (iovm1_memory_wait_test_byte(vm, tmp)) {
-                // clean up deadline timer:
-                deadline_clean_up();
+                // comparison byte
+                uint8_t v  = vm.m.ptr[vm.m.off++];
+                // comparison mask
+                uint8_t k  = vm.m.ptr[vm.m.off++];
 
-                vm->wa.os = IOVM1_OPSTATE_COMPLETED;
-                return IOVM1_SUCCESS;
+                uint8_t b;
+
+                // try to read a byte from memory chip:
+                if (c == MEM_SNES_2C00) {
+                    // special case for 2C00 EXE buffer:
+                    uint24_t addr;
+                    vm.e = snescmd_addr_from_chip(c, a, 1, &addr);
+                    if (vm.e != IOVM1_SUCCESS) {
+                        vm.s = IOVM1_STATE_ERRORED;
+                        send_end_msg();
+                        return vm.e;
+                    }
+
+                    fpga_set_snescmd_addr(addr);
+                    b = fpga_read_snescmd();
+                } else {
+                    uint24_t addr;
+                    vm.e = sram_addr_from_chip(c, a, 1, &addr);
+                    if (vm.e != IOVM1_SUCCESS) {
+                        vm.s = IOVM1_STATE_ERRORED;
+                        send_end_msg();
+                        return vm.e;
+                    }
+
+                    b = sram_readbyte(addr);
+                }
+
+                // test comparison byte against mask and value:
+                if (iovm1_memory_cmp(q, b & k, v)) {
+                    // abort if true; send an abort message back to the client:
+                    vm.s = IOVM1_STATE_ERRORED;
+                    vm.e = IOVM1_ERROR_ABORTED;
+                    send_end_msg();
+
+                    return vm.e;
+                }
+
+                // do not abort if false:
+                vm.e = IOVM1_SUCCESS;
+                return vm.e;
             }
+            default:
+                // unknown opcode:
+                vm.e = IOVM1_ERROR_UNKNOWN_OPCODE;
+                vm.s = IOVM1_STATE_ERRORED;
+                send_end_msg();
+                return vm.e;
         }
     }
 
-    // clean up deadline timer:
-    deadline_clean_up();
-    return IOVM1_ERROR_TIMED_OUT;
-}
-
-// try to read a byte from a memory chip, return byte in `*b` if successful
-enum iovm1_error host_memory_try_read_byte(struct iovm1_t *vm, enum iovm1_memory_chip c, uint24_t a, uint8_t *b) {
-    if (c == MEM_SNES_2C00) {
-        // special case for 2C00 EXE buffer:
-        uint24_t addr;
-        enum iovm1_error err = snescmd_addr_from_chip(c, a, 1, &addr);
-        if (err != IOVM1_SUCCESS) {
-            return err;
-        }
-
-        fpga_set_snescmd_addr(addr);
-        *b = fpga_read_snescmd();
-
-        return IOVM1_SUCCESS;
-    } else {
-        uint24_t addr;
-        enum iovm1_error err = sram_addr_from_chip(c, a, 1, &addr);
-        if (err != IOVM1_SUCCESS) {
-            return err;
-        }
-
-        *b = sram_readbyte(addr);
-
-        return IOVM1_SUCCESS;
-    }
-}
-
-// send a program-end message to the client
-void host_send_end(struct iovm1_t *vm) {
-    // end program message:
-    send_byte(0xFF);
-    // error code:
-    send_byte(vm->e);
-    // offset within program of where we ended:
-    send_byte(vm->p & 0xFF);
-    send_byte((vm->p >> 8) & 0xFF);
+    vm.e = IOVM1_SUCCESS;
+    return vm.e;
 }
 
 int usbint_handler_dat(void) {
@@ -1165,8 +1484,6 @@ int usbint_handler_dat(void) {
 
     switch (server_info.opcode) {
     case USBINT_SERVER_OPCODE_IOVM_EXEC: {
-        enum iovm1_state state;
-
         if (reentrant) {
             return ret;
         }
@@ -1176,14 +1493,11 @@ int usbint_handler_dat(void) {
         server_info.vm_bytes_sent = 6;
         if (!server_info.error) {
             do {
-                // move the state machine forward:
-                server_info.error = iovm1_exec(&vm);
-                if (server_info.error) {
+                // advance the state machine:
+                if (iovm1_exec()) {
                     break;
                 }
-
-                state = iovm1_get_exec_state(&vm);
-            } while (state < IOVM1_STATE_ENDED);
+            } while (vm.s < IOVM1_STATE_ENDED);
         }
 
         // finish command:
