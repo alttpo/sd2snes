@@ -296,6 +296,7 @@ extern cfg_t CFG;
 
 // reset
 void usbint_set_state(unsigned open) {
+    printf("connected: %d -> %d\n", connected, open);
     connected = open;
 }
 
