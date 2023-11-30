@@ -32,7 +32,7 @@ enum cicstates get_cic_state() {
     }
     state_old = state;
   }
-  printf("CIC toggle: %ld\n", togglecount);
+  DBG_CIC printf("CIC toggle: %ld\n", togglecount);
 /* CIC_TOGGLE_THRESH_PAIR > CIC_TOGGLE_THRESH_SCIC */
   if(togglecount > CIC_TOGGLE_THRESH_PAIR) {
     return CIC_PAIR;

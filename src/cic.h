@@ -8,6 +8,12 @@
 #include "config.h"
 #include "bits.h"
 
+#ifdef DEBUG_CIC
+#  define DBG_CIC
+#else
+#  define DBG_CIC while(0)
+#endif
+
 enum cicstates { CIC_OK = 0, CIC_FAIL, CIC_PAIR, CIC_SCIC };
 enum cic_region { CIC_NTSC = 0, CIC_PAL };
 

@@ -444,7 +444,7 @@ int main(void) {
         if(getticks() > loop_ticks + 25) {
           loop_ticks = getticks();
  //         sram_reliable();
-          printf("%s ", get_cic_statename(get_cic_state()));
+          DBG_CIC printf("%s ", get_cic_statename(get_cic_state()));
           cmd=snes_main_loop();
           if (usb_cmd && !cmd) cmd = usb_cmd;
           if(cmd) {
