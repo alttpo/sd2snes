@@ -173,7 +173,7 @@ enum iovm1_opcode {
     IOVM1_OPCODE_READ,
     IOVM1_OPCODE_WRITE,
     IOVM1_OPCODE_WAIT_UNTIL,
-    IOVM1_OPCODE_ABORT_IF
+    IOVM1_OPCODE_ABORT_UNLESS
 };
 
 enum iovm1_cmp_operator {
@@ -1057,7 +1057,11 @@ opcodes (o):
         a |= m[p++] << 16;
         // length of read in bytes (treat 0 as 256, else 1..255)
         l_raw = m[p++];
-        l = translate_zero_byte(vm->rd.l_raw);
+        if (l_raw == 0) {
+            l = 256;
+        } else {
+            l = l_raw;
+        }
 
 -----------------------
   1=WRITE:              writes bytes to memory chip
@@ -1077,7 +1081,11 @@ opcodes (o):
         a |= m[p++] << 16
         // length of write in bytes (treat 0 as 256, else 1..255)
         l_raw = m[p++]
-        l  = translate_zero_byte(l_raw)
+        if (l_raw == 0) {
+            l = 256;
+        } else {
+            l = l_raw;
+        }
 
 -----------------------
   2=WAIT_UNTIL:         waits until a byte read from a memory chip compares to a value -- for read/write timing purposes
@@ -1110,7 +1118,7 @@ opcodes (o):
         k  = m[p++]
 
 -----------------------
-  3=ABORT_IF:           reads a byte from a memory chip and compares to a value; if true, aborts program execution
+  3=ABORT_UNLESS:       reads a byte from a memory chip and compares to a value; if false, aborts program execution
      765 432 10
     [--- qqq 11]
         q = comparison operator [0..7]
@@ -1402,7 +1410,7 @@ opcodes (o):
                 // wait complete; start next instruction:
                 return vm.e;
             }
-            case IOVM1_OPCODE_ABORT_IF: {
+            case IOVM1_OPCODE_ABORT_UNLESS: {
                 vm.pn = vm.m.off + 6;
 
                 enum iovm1_cmp_operator q = IOVM1_INST_CMP_OPERATOR(x);
@@ -1448,8 +1456,8 @@ opcodes (o):
                 }
 
                 // test comparison byte against mask and value:
-                if (iovm1_memory_cmp(q, b & k, v)) {
-                    // abort if true; send an abort message back to the client:
+                if (!iovm1_memory_cmp(q, b & k, v)) {
+                    // abort if false; send an abort message back to the client:
                     vm.s = IOVM1_STATE_ERRORED;
                     vm.e = IOVM1_ERROR_ABORTED;
                     send_end_msg();
@@ -1457,7 +1465,7 @@ opcodes (o):
                     return vm.e;
                 }
 
-                // do not abort if false:
+                // do not abort if true:
                 vm.e = IOVM1_SUCCESS;
                 return vm.e;
             }
